@@ -606,6 +606,18 @@ export class AgentFlowEngine {
       invariant(task?.status === "running" && task.lease, `Task is not running: ${taskId}`, "TASK_NOT_RUNNING");
       invariant(task.owner === workerId, "Worker does not own task", "TASK_OWNER_MISMATCH");
       invariant(Date.parse(task.lease.expiresAt) > Date.parse(now), "Task lease has expired", "TASK_LEASE_EXPIRED");
+      const liveWorker = Object.values(state.workers)
+        .find((worker) => worker.taskId === taskId && isLiveWorker(worker.status));
+      invariant(
+        !liveWorker,
+        `Task still has a live worker: ${taskId}`,
+        "TASK_WORKER_LIVE",
+        {
+          taskId,
+          workerId: liveWorker?.id,
+          workerStatus: liveWorker?.status
+        }
+      );
       invariant(
         !task.requiresWorktree && task.materializedFrom?.kind !== "implementation-plan",
         `Implementation Task must complete through a bound WorkerResult: ${taskId}`,
@@ -1249,6 +1261,20 @@ export class AgentFlowEngine {
       invariant(stageRun?.status === "active", `Stage is not active: ${stageId}`, "STAGE_NOT_ACTIVE");
       this.assertStagePreflight(state, stageId, now);
       const tasks = Object.values(state.tasks).filter((task) => task.stageId === stageId);
+      const taskIds = new Set(tasks.map((task) => task.id));
+      const liveWorker = Object.values(state.workers)
+        .find((worker) => taskIds.has(worker.taskId) && isLiveWorker(worker.status));
+      invariant(
+        !liveWorker,
+        `Stage still has a live worker: ${stageId}`,
+        "STAGE_WORKER_LIVE",
+        {
+          stageId,
+          taskId: liveWorker?.taskId,
+          workerId: liveWorker?.id,
+          workerStatus: liveWorker?.status
+        }
+      );
       invariant(tasks.every((task) => task.status === "completed" || task.status === "cancelled"), "Stage has incomplete tasks", "STAGE_TASKS_INCOMPLETE");
 
       const artifactKinds = new Set(

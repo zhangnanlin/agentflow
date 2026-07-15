@@ -15,10 +15,12 @@ import {
 } from "@agentflow/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify as stringifyYaml } from "yaml";
 import { createAgentFlowMcpServer } from "../src/api.js";
 import { projectPaths } from "../src/runtime.js";
+
+vi.mock("@agentflow/core", async () => import("../../core/src/index.js"));
 
 const execFileAsync = promisify(execFile);
 
@@ -234,6 +236,7 @@ describe("AgentFlow MCP server", () => {
 
   it("atomically prepares a deterministic native dispatch and replays it without duplicate spawn intent", async () => {
     const connectedClient = requireClient(client);
+    const verificationCommand = "node -e \"const p=require('./package.json');if(p.name!=='agentflow')process.exit(1)\"";
     let result = await call(connectedClient, "task_create", {
       taskId: "dispatch-task",
       stageId: "S0",
@@ -243,7 +246,7 @@ describe("AgentFlow MCP server", () => {
       writeScopes: [],
       forbiddenScopes: [".agentflow/**"],
       acceptanceCriteria: ["The package name is reported from package.json"],
-      verificationCommands: ["node -e \"const p=require('./package.json');if(p.name!=='agentflow')process.exit(1)\""],
+      verificationCommands: [verificationCommand],
       expectedOutputs: ["A structured WorkerResult with verification evidence"],
       requiresWorktree: false,
       ...mutation(0, "create-dispatch-task", "supervisor-1")
@@ -336,6 +339,78 @@ describe("AgentFlow MCP server", () => {
     expect(runState(result).workers["dispatch-worker"]).toMatchObject({
       status: "running",
       externalThreadId: "codex-native-thread-1"
+    });
+    const boundState = runState(result);
+
+    const rejectedTaskCompletion = await call(connectedClient, "task_complete", {
+      taskId: "dispatch-task",
+      workerId: "dispatch-worker",
+      verification: [{
+        command: verificationCommand,
+        status: "passed",
+        summary: "Package boundary verified",
+        recordedAt: new Date().toISOString()
+      }],
+      result: {},
+      ...mutation(boundState.revision, "reject-live-worker-task-completion", "dispatch-worker")
+    });
+    expect(rejectedTaskCompletion).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: "TASK_WORKER_LIVE",
+        details: {
+          taskId: "dispatch-task",
+          workerId: "dispatch-worker",
+          workerStatus: "running"
+        }
+      }
+    });
+    expect(runState(await call(connectedClient, "status_get"))).toEqual(boundState);
+
+    const rejectedStageCompletion = await call(connectedClient, "stage_complete", {
+      stageId: "S0",
+      ...mutation(boundState.revision, "reject-live-worker-stage-completion", "supervisor-1")
+    });
+    expect(rejectedStageCompletion).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: "STAGE_WORKER_LIVE",
+        details: {
+          stageId: "S0",
+          taskId: "dispatch-task",
+          workerId: "dispatch-worker",
+          workerStatus: "running"
+        }
+      }
+    });
+    expect(runState(await call(connectedClient, "status_get"))).toEqual(boundState);
+
+    const completedAt = new Date().toISOString();
+    result = await call(connectedClient, "worker_collect", {
+      workerId: "dispatch-worker",
+      result: {
+        workerId: "dispatch-worker",
+        taskId: "dispatch-task",
+        status: "completed",
+        summary: "Verified the package boundary.",
+        artifacts: [],
+        changeSet: null,
+        verification: [{
+          command: verificationCommand,
+          status: "passed",
+          summary: "Package boundary verified",
+          recordedAt: completedAt
+        }],
+        risks: [],
+        followUps: [],
+        completedAt
+      },
+      ...mutation(boundState.revision, "collect-dispatch-worker", "supervisor-1")
+    });
+    expect(runState(result)).toMatchObject({
+      revision: boundState.revision + 1,
+      tasks: { "dispatch-task": { status: "completed" } },
+      workers: { "dispatch-worker": { status: "completed" } }
     });
   });
 

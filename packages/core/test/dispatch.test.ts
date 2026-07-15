@@ -45,6 +45,158 @@ describe("atomic Task dispatch preparation", () => {
     return { engine, state, projectRoot: directory };
   };
 
+  it.each(["prepared", "starting", "running", "unknown"] as const)(
+    "rejects direct Task completion while its Worker is %s",
+    async (workerStatus) => {
+      const taskId = `task-${workerStatus}`;
+      const workerId = `worker-${workerStatus}`;
+      const { engine, projectRoot } = await setup(`run-complete-${workerStatus}`);
+      let state = await engine.loadRun(`run-complete-${workerStatus}`);
+      state = await engine.createTask(state.id, {
+        id: taskId,
+        stageId: "S00",
+        title: `Exercise ${workerStatus} Worker completion`,
+        verificationCommands: ["npm test"]
+      }, context(state, `create-${taskId}`));
+      state = await engine.prepareTaskDispatch(state.id, {
+        workerId,
+        taskId,
+        adapter: "codex",
+        hostTaskName: `${taskId}_${workerId}`,
+        promptHash: "a".repeat(64),
+        capabilities,
+        leaseSeconds: 900,
+        workspace: { kind: "project", path: projectRoot }
+      }, context(state, `prepare-${workerId}`));
+
+      if (workerStatus === "starting") {
+        state = await engine.observeWorker(
+          state.id,
+          workerId,
+          "starting",
+          context(state, `observe-${workerId}-starting`)
+        );
+      } else if (workerStatus === "running" || workerStatus === "unknown") {
+        state = await engine.bindWorker(
+          state.id,
+          workerId,
+          `${workerId}-thread`,
+          context(state, `bind-${workerId}`)
+        );
+        if (workerStatus === "unknown") {
+          state = await engine.observeWorker(
+            state.id,
+            workerId,
+            "unknown",
+            context(state, `observe-${workerId}-unknown`)
+          );
+        }
+      }
+
+      await expect(engine.completeTask(
+        state.id,
+        taskId,
+        workerId,
+        [{
+          command: "npm test",
+          status: "passed",
+          summary: "Task verification passed",
+          recordedAt: new Date().toISOString()
+        }],
+        {},
+        context(state, `reject-${workerId}-direct-completion`)
+      )).rejects.toMatchObject({
+        code: "TASK_WORKER_LIVE",
+        details: { taskId, workerId, workerStatus }
+      });
+      expect(await engine.loadRun(state.id)).toEqual(state);
+    }
+  );
+
+  it("rejects Stage completion before incomplete Task, Artifact, or Gate checks while a Worker is live", async () => {
+    const taskId = "task-stage-live";
+    const workerId = "worker-stage-live";
+    const { engine, projectRoot } = await setup("run-stage-live");
+    let state = await engine.loadRun("run-stage-live");
+    state = await engine.createTask(state.id, {
+      id: taskId,
+      stageId: "S00",
+      title: "Keep the Stage Worker live"
+    }, context(state, "create-stage-live-task"));
+    state = await engine.prepareTaskDispatch(state.id, {
+      workerId,
+      taskId,
+      adapter: "codex",
+      hostTaskName: "task_stage_live_worker_stage_live",
+      promptHash: "b".repeat(64),
+      capabilities,
+      leaseSeconds: 900,
+      workspace: { kind: "project", path: projectRoot }
+    }, context(state, "prepare-stage-live-worker"));
+    state = await engine.bindWorker(
+      state.id,
+      workerId,
+      "stage-live-thread",
+      context(state, "bind-stage-live-worker")
+    );
+
+    await expect(engine.completeStage(
+      state.id,
+      "S00",
+      context(state, "reject-stage-completion-with-live-worker")
+    )).rejects.toMatchObject({
+      code: "STAGE_WORKER_LIVE",
+      details: {
+        stageId: "S00",
+        taskId,
+        workerId,
+        workerStatus: "running"
+      }
+    });
+    expect(await engine.loadRun(state.id)).toEqual(state);
+  });
+
+  it("preserves direct completion for a claimed Task without a persisted live Worker", async () => {
+    const taskId = "task-unbound";
+    const workerId = "worker-unbound";
+    const { engine } = await setup("run-unbound-completion");
+    let state = await engine.loadRun("run-unbound-completion");
+    state = await engine.createTask(state.id, {
+      id: taskId,
+      stageId: "S00",
+      title: "Complete an unbound Task",
+      verificationCommands: ["npm test"]
+    }, context(state, "create-unbound-task"));
+    state = await engine.claimTask(
+      state.id,
+      taskId,
+      workerId,
+      900,
+      context(state, "claim-unbound-task")
+    );
+
+    state = await engine.completeTask(
+      state.id,
+      taskId,
+      workerId,
+      [{
+        command: "npm test",
+        status: "passed",
+        summary: "Task verification passed",
+        recordedAt: new Date().toISOString()
+      }],
+      { summary: "Completed without a native Worker." },
+      context(state, "complete-unbound-task")
+    );
+
+    expect(state.tasks[taskId]).toMatchObject({
+      status: "completed",
+      owner: workerId,
+      result: { summary: "Completed without a native Worker." }
+    });
+    expect(state.workers[workerId]).toBeUndefined();
+  });
+
   it("claims the Task, binds its workspace, and persists a prepared Worker in one revision", async () => {
     const { engine, projectRoot } = await setup("run-dispatch");
     let state = await engine.loadRun("run-dispatch");
