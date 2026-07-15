@@ -85,6 +85,13 @@ describe("atomic Task dispatch preparation", () => {
       promptHash: "a".repeat(64)
     });
     expect(state.events.slice(-2).map((event) => event.type)).toEqual(["task.claimed", "worker.prepared"]);
+    await expect(engine.abortTaskSetup(
+      state.id,
+      "task-1",
+      "worker-1",
+      "Dispatch setup was cancelled.",
+      context(state, "reject-abort-with-live-worker")
+    )).rejects.toMatchObject({ code: "TASK_WORKER_LIVE" });
 
     const retried = await engine.prepareTaskDispatch(state.id, {
       workerId: "worker-1",
