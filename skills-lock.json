@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-15T20:15:00+08:00",
+  "updatePolicy": "manual-review-only",
+  "dependencies": [
+    {
+      "id": "obra-superpowers",
+      "repository": "https://github.com/obra/superpowers.git",
+      "commit": "d884ae04edebef577e82ff7c4e143debd0bbec99",
+      "license": "MIT",
+      "sourceMode": "external-host",
+      "reviewedAt": "2026-07-15",
+      "skills": [
+        { "name": "brainstorming", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "writing-plans", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "executing-plans", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "subagent-driven-development", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "dispatching-parallel-agents", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "test-driven-development", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "requesting-code-review", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "receiving-code-review", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "systematic-debugging", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "verification-before-completion", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "finishing-a-development-branch", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } }
+      ]
+    },
+    {
+      "id": "figma-mcp-server-guide",
+      "repository": "https://github.com/figma/mcp-server-guide.git",
+      "commit": "07316dd2920d61303ca0e52812b31f5f341e7b15",
+      "license": "Figma Developer Terms; no repository LICENSE at pinned commit",
+      "sourceMode": "external-host",
+      "reviewedAt": "2026-07-15",
+      "restrictions": [
+        "Load figma-use before every use_figma call",
+        "Do not vendor or redistribute without confirming Figma terms",
+        "Community and external libraries require an allowlist"
+      ],
+      "skills": [
+        { "name": "figma-use", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        { "name": "figma-generate-design", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "warn" } },
+        { "name": "figma-generate-library", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "warn" } },
+        { "name": "figma-generate-diagram", "audits": { "agentTrustHub": "pass", "socket": "unknown", "snyk": "unknown" } }
+      ]
+    }
+  ]
+}

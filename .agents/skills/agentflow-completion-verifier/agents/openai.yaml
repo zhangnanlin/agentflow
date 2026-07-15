@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Completion Verifier"
+  short_description: "Verify release evidence and close the run"
+  default_prompt: "Use $agentflow-completion-verifier to verify the released system and register the S15 final manifest."

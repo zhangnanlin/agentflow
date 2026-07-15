@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Product Discovery"
+  short_description: "Turn a request into an approved product brief"
+  default_prompt: "Use $agentflow-product-discovery to clarify this request and produce the product brief."

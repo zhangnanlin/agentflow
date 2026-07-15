@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow PRD Authoring"
+  short_description: "Create a traceable approved product requirements document"
+  default_prompt: "Use $agentflow-prd-authoring to turn the approved product brief into a testable PRD."

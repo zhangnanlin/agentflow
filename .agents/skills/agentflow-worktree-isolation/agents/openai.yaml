@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Worktree Isolation"
+  short_description: "Prepare guarded worktrees for parallel workers"
+  default_prompt: "Use $agentflow-worktree-isolation to prepare isolated workspaces for the ready implementation tasks."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Codex Host Bridge"
+  short_description: "Bind AgentFlow workers to Codex tasks"
+  default_prompt: "Use $agentflow-codex-host-bridge to dispatch and recover the ready AgentFlow workers in Codex."

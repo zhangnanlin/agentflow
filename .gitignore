@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.agentflow/runtime/
+.agentflow/runs/
+.agentflow/current-run.json
+.worktrees/
+*.log

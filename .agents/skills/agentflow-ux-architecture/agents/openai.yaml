@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow UX Architecture"
+  short_description: "Define journeys screens states and responsive behavior"
+  default_prompt: "Use $agentflow-ux-architecture to derive the UX architecture from the approved PRD."

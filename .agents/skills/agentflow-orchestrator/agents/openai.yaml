@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Orchestrator"
+  short_description: "Coordinate staged multi-thread project delivery"
+  default_prompt: "Use $agentflow-orchestrator to start or resume this project's staged delivery workflow."

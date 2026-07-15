@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Integration Manager"
+  short_description: "Integrate Workers and close review findings"
+  default_prompt: "Use $agentflow-integration-manager to integrate completed S11 work and produce the S12 report."

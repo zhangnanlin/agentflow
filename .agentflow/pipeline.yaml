@@ -1,0 +1,264 @@
+id: agentflow-default
+version: 0.4.0
+name: AgentFlow default software delivery pipeline
+stages:
+  - id: S00
+    name: Intake
+    description: ""
+    dependsOn: []
+    skills:
+      - agentflow-orchestrator
+    tools: []
+    requiredArtifactKinds:
+      - project-context
+    skippableWhen: []
+  - id: S01
+    name: Discovery
+    description: ""
+    dependsOn:
+      - S00
+    skills:
+      - brainstorming
+      - agentflow-product-discovery
+    tools: []
+    requiredArtifactKinds:
+      - product-brief
+    skippableWhen: []
+  - id: S02
+    name: PRD
+    description: ""
+    dependsOn:
+      - S01
+    skills:
+      - agentflow-prd-authoring
+    tools: []
+    requiredArtifactKinds:
+      - prd
+    requiredGate:
+      id: requirements-approved
+      type: human
+      question: Approve the product scope and requirements?
+      options:
+        - approve
+        - reject
+    skippableWhen: []
+  - id: S03
+    name: UX Architecture
+    description: ""
+    dependsOn:
+      - S02
+    skills:
+      - agentflow-ux-architecture
+      - figma-generate-diagram
+    tools:
+      - figma.generate_diagram
+    requiredArtifactKinds:
+      - ux-architecture
+    skippableWhen:
+      - hasUi=false
+  - id: S04
+    name: Design Concepts
+    description: ""
+    dependsOn:
+      - S03
+    skills:
+      - agentflow-figma-concept-explorer
+      - figma-use
+    tools:
+      - agentflow.resource
+      - figma.whoami
+      - figma.create_new_file
+      - figma.use_figma
+      - figma.get_metadata
+      - figma.get_screenshot
+    requiredCapabilities:
+      - host.worker.spawn
+      - host.worker.collect
+      - figma.remote.connected
+      - figma.remote.authenticated
+      - figma.tool.whoami
+      - figma.tool.create_new_file
+      - figma.tool.use_figma
+      - figma.tool.get_metadata
+      - figma.tool.get_screenshot
+      - skill.figma-use
+    requiredArtifactKinds:
+      - design-concepts
+    requiredGate:
+      id: design-direction-approved
+      type: human
+      question: Choose and approve a design direction?
+      options:
+        - A
+        - B
+        - C
+        - mixed
+        - reject
+    skippableWhen:
+      - hasUi=false
+  - id: S05
+    name: Design System
+    description: ""
+    dependsOn:
+      - S04
+    skills:
+      - figma-use
+      - figma-generate-library
+    tools:
+      - agentflow.resource
+      - figma.use_figma
+      - figma.get_libraries
+      - figma.search_design_system
+      - figma.get_metadata
+      - figma.get_screenshot
+    requiredArtifactKinds:
+      - design-system
+    skippableWhen:
+      - hasUi=false
+  - id: S06
+    name: Production Design
+    description: ""
+    dependsOn:
+      - S05
+    skills:
+      - agentflow-figma-production-design
+      - figma-use
+      - figma-generate-design
+    tools:
+      - agentflow.resource
+      - figma.use_figma
+      - figma.get_metadata
+      - figma.get_screenshot
+    requiredArtifactKinds:
+      - production-design
+    skippableWhen:
+      - hasUi=false
+  - id: S07
+    name: Design Review
+    description: ""
+    dependsOn:
+      - S06
+    skills:
+      - agentflow-figma-a11y-review
+    tools: []
+    requiredArtifactKinds:
+      - design-review
+    requiredGate:
+      id: design-freeze-approved
+      type: human
+      question: Freeze the complete design for implementation?
+      options:
+        - approve
+        - reject
+    skippableWhen:
+      - hasUi=false
+  - id: S08
+    name: Design Handoff
+    description: ""
+    dependsOn:
+      - S07
+    skills:
+      - agentflow-design-handoff
+    tools: []
+    requiredArtifactKinds:
+      - design-manifest
+    skippableWhen:
+      - hasUi=false
+  - id: S09
+    name: Architecture
+    description: ""
+    dependsOn:
+      - S08
+    skills:
+      - agentflow-architecture
+    tools: []
+    requiredArtifactKinds:
+      - architecture
+    skippableWhen: []
+  - id: S10
+    name: Engineering Plan
+    description: ""
+    dependsOn:
+      - S09
+    skills:
+      - agentflow-engineering-plan
+      - writing-plans
+    tools: []
+    requiredArtifactKinds:
+      - implementation-plan
+    requiredGate:
+      id: engineering-plan-approved
+      type: human
+      question: Approve the engineering implementation plan?
+      options:
+        - approve
+        - reject
+    skippableWhen: []
+  - id: S11
+    name: Implementation
+    description: ""
+    dependsOn:
+      - S10
+    skills:
+      - agentflow-worktree-isolation
+      - test-driven-development
+      - dispatching-parallel-agents
+    tools: []
+    requiredArtifactKinds: []
+    skippableWhen: []
+  - id: S12
+    name: Integration
+    description: ""
+    dependsOn:
+      - S11
+    skills:
+      - agentflow-integration-manager
+      - requesting-code-review
+    tools: []
+    requiredArtifactKinds:
+      - integration-report
+    skippableWhen: []
+  - id: S13
+    name: System QA
+    description: ""
+    dependsOn:
+      - S12
+    skills:
+      - agentflow-visual-qa
+      - accessibility
+      - security-audit
+    tools: []
+    requiredArtifactKinds:
+      - qa-report
+    skippableWhen: []
+  - id: S14
+    name: Release
+    description: ""
+    dependsOn:
+      - S13
+    skills:
+      - agentflow-release-gate
+      - finishing-a-development-branch
+    tools: []
+    requiredArtifactKinds:
+      - release-plan
+    requiredGate:
+      id: release-approved
+      type: human
+      question: Approve the release to the target environment?
+      options:
+        - approve
+        - reject
+    skippableWhen: []
+  - id: S15
+    name: Done
+    description: ""
+    dependsOn:
+      - S14
+    skills:
+      - agentflow-completion-verifier
+      - verification-before-completion
+    tools: []
+    requiredArtifactKinds:
+      - final-manifest
+    skippableWhen: []

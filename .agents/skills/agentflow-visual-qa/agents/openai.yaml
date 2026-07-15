@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow System QA"
+  short_description: "Verify integrated behavior and quality gates"
+  default_prompt: "Use $agentflow-visual-qa to test the integrated revision and produce the S13 QA report."

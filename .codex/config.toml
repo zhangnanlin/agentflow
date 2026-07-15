@@ -1,0 +1,6 @@
+[mcp_servers.agentflow]
+command = "node"
+args = ["D:\\Users\\Apps\\project\\agents\\packages\\mcp-server\\dist\\index.js", "--project-root", "D:\\Users\\Apps\\project\\agents"]
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"

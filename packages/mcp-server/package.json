@@ -1,0 +1,24 @@
+{
+  "name": "@agentflow/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/api.js",
+  "types": "./dist/api.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    }
+  },
+  "bin": {
+    "agentflow-mcp": "./dist/index.js"
+  },
+  "dependencies": {
+    "@agentflow/core": "0.1.0",
+    "@agentflow/host-adapter": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Engineering Plan"
+  short_description: "Create an executable S10 Task DAG"
+  default_prompt: "Use $agentflow-engineering-plan to turn the approved architecture into a gated implementation plan."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Figma Concept Explorer"
+  short_description: "Compare three Figma directions through one writer"
+  default_prompt: "Use $agentflow-figma-concept-explorer to create comparable A, B, and C design directions with one Figma writer."

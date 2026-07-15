@@ -1,0 +1,18 @@
+{
+  "inputs": [],
+  "servers": {
+    "agentflow": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "D:\\Users\\Apps\\project\\agents\\packages\\mcp-server\\dist\\index.js",
+        "--project-root",
+        "D:\\Users\\Apps\\project\\agents"
+      ]
+    },
+    "figma": {
+      "type": "http",
+      "url": "https://mcp.figma.com/mcp"
+    }
+  }
+}

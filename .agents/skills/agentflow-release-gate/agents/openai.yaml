@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Release Gate"
+  short_description: "Prepare and gate an auditable release"
+  default_prompt: "Use $agentflow-release-gate to prepare the S14 release plan without deploying before approval."

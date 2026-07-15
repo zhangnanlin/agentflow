@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Architecture"
+  short_description: "Define traceable architecture and ADRs"
+  default_prompt: "Use $agentflow-architecture to produce the S09 architecture from approved artifacts and repository evidence."
