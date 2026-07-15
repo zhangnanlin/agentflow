@@ -11,6 +11,8 @@ Use the current host's equivalent operation when names differ. Never substitute 
 | `interrupt` | Interrupt the native Worker | `worker_interrupt` after confirmation |
 | `close` | Often unavailable for Codex subagents | Keep false; do not simulate it |
 
+For a bound live Worker, never substitute `task_complete` for `worker_collect`. Any valid terminal structured result, including `blocked` or `failed`, goes through `worker_collect`; a confirmed native or protocol failure without a valid result goes through `worker_fail`; a confirmed native interruption goes through `worker_interrupt`. Task completion does not prove that the native Worker stopped.
+
 ## Codex Collaboration Defaults
 
 - Prefer the native collaboration/subagent API for internal Worker Tasks.
@@ -30,8 +32,11 @@ Use the current host's equivalent operation when names differ. Never substitute 
 | running, bound ID | native running | observe running and continue heartbeat |
 | running, bound ID | native terminal with valid JSON | collect |
 | running, bound ID | native missing | mark unknown and report; do not respawn automatically |
-| live Worker | native terminal with invalid JSON | fail Worker, retry Task with a fresh Worker ID |
+| live Worker | native terminal with invalid JSON or confirmed failure without a valid result | fail Worker, then retry Task with a fresh Worker ID when allowed |
+| live Worker | native interruption confirmed | record the interruption; redispatch only after AgentFlow readies the Task |
+| Task appears terminal, Worker is live | any | inspect by bound ID; call `worker_fail` or `worker_interrupt` only after the corresponding failure or interruption is confirmed, and stop for state reconciliation without completing the Stage if a valid result cannot be collected from the non-running Task |
 | claimed setup, no Worker | worktree creation or prepare failed | preserve the error and call `task_setup_abort` |
 | terminal | any | do not redispatch |
 
 When the lease is near expiry, heartbeat only after confirming that the bound native Worker still exists and owns the same Task.
+Before `stage_complete`, reload AgentFlow status and require no `prepared`, `starting`, `running`, or `unknown` Worker whose Task belongs to the Stage.

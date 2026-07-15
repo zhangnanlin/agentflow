@@ -57,6 +57,16 @@ Require one JSON object and reject mismatched `workerId` or `taskId`.
 
 Use `changeSet: null` for read-only or non-code work. A completed implementation-plan Task must return a non-null change set. MCP verifies the bound branch, approved ancestry, exact HEAD and revision order, clean status, and path set against Git before Core accepts it. Every declared verification command must have an exact passed record; unrelated substitute commands do not count. A `blocked` result must name the missing decision or external dependency and must not guess the answer.
 
+## Terminal Lifecycle
+
+Treat `prepared`, `starting`, `running`, and `unknown` as live Worker statuses. For a bound live Worker, never call `task_complete` and never infer native termination from the Task status. Use exactly one confirmed terminal path:
+
+- Call `worker_collect` with the untouched valid structured result after the native Worker is terminal.
+- Call `worker_fail` only after a native dispatch or protocol failure is confirmed and no valid Worker Result exists.
+- Call the native interrupt operation first, then `worker_interrupt` only after the host confirms interruption.
+
+Direct `task_complete` remains legal only for a claimed Task with no persisted live Worker. Before `stage_complete`, reload status and require that no Worker whose Task belongs to the Stage has a live status.
+
 ## Native Host Mapping
 
 Map the contract to native thread operations through the Host Adapter:
