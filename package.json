@@ -15,6 +15,7 @@
     ".agents/skills",
     "skills-lock.json",
     "README.md",
+    "README.zh-CN.md",
     "docs/HOST_SETUP.md"
   ],
   "scripts": {

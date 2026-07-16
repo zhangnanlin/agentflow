@@ -141,7 +141,9 @@ describe("standalone AgentFlow distribution", () => {
       "bundle/agentflow-cli.mjs",
       "bundle/agentflow-mcp.mjs",
       ".agents/skills/agentflow-auto-router/SKILL.md",
-      "skills-lock.json"
+      "skills-lock.json",
+      "README.md",
+      "README.zh-CN.md"
     ]));
     expect(files).not.toEqual(expect.arrayContaining([
       ".codex/config.toml",

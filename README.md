@@ -1,94 +1,143 @@
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 # AgentFlow
 
-AgentFlow coordinates staged software delivery across one Supervisor conversation and multiple Worker conversations in the same editor client. Tasks, Artifacts, approvals, leases, and Stage transitions live outside chat history so a run can be resumed and audited.
+AgentFlow coordinates a resumable software-delivery pipeline across one Supervisor conversation and multiple bounded Worker conversations in the same Codex, Cursor, or VS Code client.
 
-The repository implements the M0 state engine, M1 persistent Worker/host contracts, the M2 product-to-design control plane, and the first M3 engineering/quality contract slice described in [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md). Pipeline `0.4.0` carries typed Artifacts from product discovery through architecture, planning, integration, QA, release planning, and the final manifest. Codex is the first runnable Host Adapter target. Worker bindings survive Supervisor restarts; known Artifacts are schema/hash validated; Figma writes use an exclusive Writer lease plus a per-call operation mutex.
+## Prerequisites
 
-## Development
+- Node.js 20 or newer
+- Git
+- Codex, Cursor, or VS Code
+- A project directory in which you can create files
+
+From the project root, run:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex
+```
+
+Use `cursor`, `vscode`, or `all` instead of `codex` when appropriate. The `v0.2.0` tag is intentionally pending until the release Gate is approved; the command becomes the stable friend-facing entry point after that tag is pushed.
+
+Setup installs a standalone runtime under `.agentflow/runtime/`, copies reviewed Skills, safely merges project-scoped MCP configuration, and installs persistent automatic-routing instructions. It never writes a token, OAuth credential, or Authorization header.
+
+After setup:
+
+1. Restart the selected host if it does not reload project instructions and MCP configuration automatically.
+2. Complete host-owned Figma OAuth when you intend to run a UI Stage.
+3. Enter an ordinary requirement. You do not need to mention `agentflow-orchestrator`.
+
+## Automatic Routing
+
+Every request whose requested outcome changes the project enters or resumes AgentFlow. This includes new projects, features, bug fixes, refactors, tests, documentation, configuration, migrations, design work, and releases.
+
+These requests bypass AgentFlow:
+
+- Pure questions
+- Code explanation
+- Read-only inspection
+- Status lookup
+- Simple commands that do not modify the project
+
+`agentflow:on` forces routing for one request. `agentflow:off` bypasses routing for one request. Neither token changes future requests.
+
+Before editing, the router checks `.agentflow/current-run.json` or AgentFlow status. An unfinished Run is resumed instead of duplicated. Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates still require explicit human approval.
+
+Skills and MCP tools are loaded only when the active Pipeline Stage declares them. Figma is not called for a non-UI project or a read-only question, and a configured Figma server is not treated as live authentication evidence.
+
+## Setup Options
+
+Install every host surface:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host all
+```
+
+Target another project without changing directories:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.2.0 \
+  --project-root /absolute/project/path setup --host codex
+```
+
+Validate the filesystem plan without writing:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex --dry-run
+```
+
+Install and start the first Run in one command:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex \
+  --start "Build a small team project manager" \
+  --project-type new
+```
+
+Add `--no-ui` for a non-UI Run. `--project-type` and `--no-ui` require `--start`; `--dry-run` cannot be combined with `--start`. Use `--skip-external-skills` only when approved external Skills are already managed separately.
+
+Dry-run does not mutate the project, so static doctor checks are reported as `ok: null, skipped: true`. Run Setup normally, then use the installed doctor to verify the resulting project.
+
+Setup is idempotent. Re-running it updates AgentFlow-owned blocks, preserves unrelated instructions and MCP servers, and returns the current unfinished Run rather than creating another one.
+
+The setup JSON includes durable runtime paths, installed Skill names, pinned dependency commits, and one static doctor report per selected host. Setup does not start a Run when any doctor report is blocked.
+
+## Verify And Recover
+
+Run the installed doctor from the target project:
+
+```bash
+node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host codex
+```
+
+A healthy static report may remain `warn` because an editor restart and Figma OAuth cannot be proven from files. Before S04, the Supervisor must probe the live host registry, load `figma-use`, and call Figma `whoami`; missing capability evidence blocks only the dependent design Stage.
+
+Setup computes and validates every destination before writing. It aborts on conflicting `agentflow` or `figma` servers, different same-name Skills, malformed managed markers, symbolic links, and path escapes. Writes use same-directory temporary files and rollback this invocation if a later write fails.
+
+Rerun the same setup command after repairing a reported conflict. Existing Run state and completed Artifacts remain intact. See [Host Setup](./docs/HOST_SETUP.md) for host-specific OAuth, diagnostics, recovery, and manual rollback.
+
+## What Gets Installed
+
+- `.agentflow/runtime/bin/agentflow-cli.mjs`
+- `.agentflow/runtime/bin/agentflow-mcp.mjs`
+- `.agentflow/config.yaml` and `.agentflow/pipeline.yaml` when absent
+- `.agents/skills/agentflow-*`
+- Pinned Superpowers Skills declared by `skills-lock.json`
+- `AGENTS.md` managed routing block
+- `.cursor/rules/agentflow.mdc` for Cursor
+- `.github/copilot-instructions.md` for VS Code
+- `.codex/config.toml`, `.cursor/mcp.json`, or `.vscode/mcp.json`
+
+Generated runtime and machine MCP files are ignored by Git. Portable routing instructions and AgentFlow Skills can be reviewed and committed with the project.
+
+## Contributors
 
 ```bash
 npm install
 npm test
 npm run typecheck
 npm run build
+npm run build:distribution
 ```
 
-Run the CLI from source:
+Run source commands with:
 
 ```bash
-npm run cli -- init
-npm run cli -- start "Build a small team project manager"
+npm run cli -- setup --host codex --skip-external-skills
 npm run cli -- status
-```
-
-Generate a project-scoped MCP configuration without overwriting existing host settings:
-
-```bash
-npm run cli -- configure --host codex
-npm run cli -- configure --host cursor
-npm run cli -- configure --host vscode
-```
-
-Add `--write` to create the target only when it does not already exist. Complete Figma OAuth in the host, then pass the live registry snapshot into the S04 doctor. Static configuration alone never counts as live capability evidence.
-
-```bash
-npm run cli -- doctor --host codex --stage S04 --live-probe \
-  --capability host.worker.spawn host.worker.collect \
-  figma.remote.connected figma.remote.authenticated \
-  figma.tool.whoami figma.tool.create_new_file figma.tool.use_figma \
-  figma.tool.get_metadata figma.tool.get_screenshot skill.figma-use
-```
-
-See [docs/HOST_SETUP.md](./docs/HOST_SETUP.md) for Codex, Cursor, and VS Code setup and recovery.
-
-Run the MCP server over stdio for the current project:
-
-```bash
-npm run mcp
-```
-
-Point it at another project with:
-
-```bash
 npm run mcp -- --project-root /absolute/project/path
 ```
 
-The MCP exposes 31 tools covering pipeline/status reads, atomic implementation-plan materialization, deterministic Worker dispatch preparation, recoverable Task setup, Task and Worker lifecycles, exclusive resources and operation ledgers, Artifact validation/registration, Gates, Stages, and durable live-capability preflight. Every mutation requires an explicit run ID, expected revision, idempotency key, actor ID, and reason, then reuses Core invariants.
+The root package exposes the standalone `agentflow` bin. `prepare` rebuilds `bundle/agentflow-cli.mjs` and `bundle/agentflow-mcp.mjs`; the packaged runtime has no dependency on unpublished `@agentflow/*` workspace packages.
 
-## Packages
+## Architecture
 
-- `@agentflow/core`: pipeline state, persistent Workers, exclusive resources, typed Artifact contracts, live Stage preflight, Gates, recovery, and invariants.
-- `@agentflow/cli`: local project initialization, portable host configuration, capability-aware doctor, and operator commands.
-- `@agentflow/mcp-server`: MCP tools used by supervisor and worker agents.
-- `@agentflow/host-adapter`: portable thread contract, bounded Worker envelopes, structured results, and the Codex adapter bridge.
+- `@agentflow/core`: persistent Run, Stage, Task, Worker, Artifact, resource, preflight, and Gate invariants.
+- `@agentflow/cli`: setup, initialization, diagnostics, and operator commands.
+- `@agentflow/mcp-server`: Supervisor and Worker state tools over stdio.
+- `@agentflow/host-adapter`: portable Worker contract and Codex native bridge.
+- `.agents/skills/`: Stage-specific operating contracts, including `agentflow-auto-router` and `agentflow-orchestrator`.
 
-## Skills
+Pipeline `0.4.0` carries typed evidence from discovery through architecture, implementation, integration, QA, release planning, and final verification. Codex native Worker execution has been exercised. Cursor and VS Code persistent configuration is implemented, while their native Worker execution remains an explicit validation boundary. Live Figma evidence also remains blocked until an authenticated host exposes the required tools.
 
-Project-scoped, Agent Skills compatible Skills live in `.agents/skills/`:
-
-- `agentflow-orchestrator`: start, resume, dispatch, collect, Gate, and Stage rules.
-- `agentflow-codex-host-bridge`: exact mapping between persistent Workers and Codex native collaboration tools.
-- `agentflow-product-discovery`: Superpowers brainstorming wrapper and product-brief contract.
-- `agentflow-prd-authoring`: traceable user stories, requirements, and measurable acceptance criteria.
-- `agentflow-ux-architecture`: roles, journeys, screens, states, navigation, and responsive behavior.
-- `agentflow-figma-concept-explorer`: three comparable directions through one sequential Figma Writer.
-- `agentflow-architecture`: traceable component, interface, data, security, operations, and decision architecture.
-- `agentflow-engineering-plan`: an implementation Task DAG with write scopes, dependencies, verification, and integration order.
-- `agentflow-worktree-isolation`: guarded parallel implementation worktrees.
-- `agentflow-integration-manager`: dependency-ordered reconciliation, review findings, and repository-wide verification.
-- `agentflow-visual-qa`: evidence-based functional, visual, accessibility, performance, reliability, and security QA.
-- `agentflow-release-gate`: an auditable release/rollback plan bound to explicit user approval.
-- `agentflow-completion-verifier`: terminal release evidence and full-lineage verification before S15 completes.
-
-Skills and MCP tools are selected by the active Stage. They are not all invoked on every request.
-External Skill commits and audit snapshots are pinned in `skills-lock.json`; upgrades are manual-review only.
-
-## Current Boundary
-
-The state engine, CLI, MCP, project Skills, and Codex bridge are executable and tested. One read-only Codex Worker and two parallel writable Codex Workers have completed the durable `worker_dispatch_prepare -> native spawn -> worker_bind -> worker_collect` path using exact generated task names and prompts plus native IDs returned by the host. The writable pair started from baseline `183aff9d895363b579ea1300c993407c8101a7a3`, used disjoint real Git worktrees, returned clean `git-commits` change sets, and was collected only after independent Git and command verification. The M1 suite also dispatches two implementation Workers, reconstructs their handles after a simulated restart, and runs a dependent Review Worker. M2 validates Product Brief, PRD, UX Architecture, and A/B/C Concept Set payloads, tests sequential Figma operations through one Writer with fixtures, and requires a structured design-direction choice. The S04 preflight distinguishes configured from live capabilities, persists a missing-Figma block, survives reload, and can resume the same pending Writer Task after a passing probe.
-
-Pipeline `0.4.0` now declares AgentFlow wrappers throughout S09-S15. Core registers the six engineering and quality contracts, binds implementation plans to an approved Git branch and base revision, atomically materializes wave-gated S11 DAGs, and prepares deterministic Worker dispatches with verified workspace bindings and resolvable Artifact locators. Completed implementation Workers must return a clean, Git-verified change set and exact evidence for every declared verification command. A repeatable E2E uses two real temporary Git worktrees and commits, collects both Task revisions, rejects forged integration lineage, cherry-picks in plan order, and completes S12 with a strict Integration Report. Its Worker execution remains test-driven. Separately, the workspace forward test now proves the same native Codex pair can write, commit, return structured results, pass MCP Git validation, and integrate into `main`; it used bounded S00 regression Tasks and is not evidence of an approved S10-to-S12 project run.
-
-Codex and Figma tools are model/host capabilities, not callable directly from an ordinary Node package. Project MCP configuration has been created for Codex, Cursor, and VS Code, and all three pass static `doctor`; that proves configuration shape only. The current session exposes neither live Figma tools nor `figma-use`, so S04 is correctly blocked and no Figma file, node, screenshot, or rendered Artifact is claimed. Cursor and VS Code native Worker Adapters have not been exercised; only the Codex native path has. GUI clicking, fabricated OAuth state, and fabricated external evidence remain excluded.
-
-This workspace now has an explicit Git baseline and the two verified native Worker changes are integrated on `main`. Future implementation plans must pin the then-current approved branch and full revision; the forward test did not advance S00, resolve a human Gate, or claim a complete staged project run.
+See [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md) for the complete project contract and current boundaries.

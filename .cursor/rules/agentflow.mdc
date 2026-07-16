@@ -1,0 +1,15 @@
+---
+description: Route project changes through AgentFlow
+globs:
+alwaysApply: true
+---
+
+<!-- agentflow:auto-router:start -->
+## AgentFlow automatic routing
+- For every project-changing request, load agentflow-auto-router before editing.
+- Pure questions, code explanation, read-only inspection, status lookup, and simple non-mutating commands bypass AgentFlow.
+- agentflow:on forces routing for one request; agentflow:off bypasses it for one request.
+- Inspect .agentflow/current-run.json or AgentFlow status_get first. Resume an unfinished Run and never duplicate it.
+- If no unfinished Run exists, preserve the user's original requirement and start the correct new/existing and UI/non-UI Run.
+- Execute staged work through agentflow-orchestrator and its Workers. Preserve every human Gate and never infer approval.
+<!-- agentflow:auto-router:end -->
