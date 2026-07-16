@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentFlow Auto Router"
+  short_description: "Route project changes into AgentFlow safely"
+  default_prompt: "Use $agentflow-auto-router to route this request safely."
