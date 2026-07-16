@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { Command, InvalidArgumentError, Option } from "commander";
-import { AgentFlowError, sha256, type Actor, type VerificationRecord } from "@agentflow/core";
+import {
+  AgentFlowError,
+  sha256,
+  type Actor,
+  type RunState,
+  type VerificationRecord
+} from "@agentflow/core";
 import {
   createEngine,
   initializeProject,
@@ -17,6 +23,8 @@ import {
 } from "./runtime.js";
 import { hostConfigurationSpec, runDoctor } from "./doctor.js";
 import { planHostConfiguration, type HostClient } from "./host-config.js";
+import { resolveDistributionAssets } from "./distribution.js";
+import { executeSetup } from "./setup.js";
 
 const program = new Command()
   .name("agentflow")
@@ -52,6 +60,87 @@ function addMutationOptions(command: Command): Command {
     .option("--revision <number>", "expected state revision", (value) => parseInteger(value, 0, "revision"))
     .option("--idempotency-key <key>", "stable retry key");
 }
+
+function parseSetupHost(value: string): HostClient | "all" {
+  if (!["codex", "cursor", "vscode", "all"].includes(value)) {
+    throw new InvalidArgumentError("host must be codex, cursor, vscode, or all");
+  }
+  return value as HostClient | "all";
+}
+
+program.command("setup")
+  .description("install AgentFlow runtime, Skills, routing, and host configuration")
+  .requiredOption("--host <host>", "editor host", parseSetupHost)
+  .option("--dry-run", "validate and report the setup plan without writing")
+  .option("--skip-external-skills", "do not install pinned external Skills")
+  .option("--start <requirement>", "start the first Run after setup succeeds")
+  .addOption(new Option("--project-type <type>").choices(["new", "existing"]))
+  .option("--no-ui", "mark the started project as having no UI")
+  .action(async (options: {
+    host: HostClient | "all";
+    dryRun?: boolean;
+    skipExternalSkills?: boolean;
+    start?: string;
+    projectType?: "new" | "existing";
+    ui: boolean;
+  }) => {
+    if (options.start === undefined && (options.ui === false || options.projectType !== undefined)) {
+      throw new AgentFlowError(
+        "--no-ui and --project-type require --start",
+        "SETUP_OPTION_REQUIRES_START"
+      );
+    }
+    if (options.dryRun && options.start !== undefined) {
+      throw new AgentFlowError(
+        "--dry-run cannot be combined with --start",
+        "SETUP_DRY_RUN_START_CONFLICT"
+      );
+    }
+
+    const setup = await executeSetup({
+      projectRoot: paths().projectRoot,
+      hosts: [options.host],
+      assets: await resolveDistributionAssets(),
+      dryRun: options.dryRun === true,
+      skipExternalSkills: options.skipExternalSkills === true
+    });
+
+    if (options.start === undefined) {
+      printJson(setup);
+      return;
+    }
+
+    await initializeProject(paths());
+    const engine = await createEngine(paths());
+    let state: RunState | undefined;
+    let currentRunId: string | undefined;
+    try {
+      currentRunId = await readCurrentRun(paths());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (currentRunId !== undefined) {
+      const current = await engine.loadRun(currentRunId);
+      if (current.activeStageId !== null) state = current;
+    }
+    if (state === undefined) {
+      state = await engine.createRun({
+        requirement: options.start,
+        projectType: options.projectType ?? "new",
+        hasUi: options.ui
+      });
+      await writeCurrentRun(state.id, paths());
+    }
+    printJson({
+      ...setup,
+      run: {
+        id: state.id,
+        requirement: state.requirement,
+        activeStageId: state.activeStageId,
+        revision: state.revision
+      }
+    });
+  });
 
 program.command("init")
   .description("initialize AgentFlow files in the project")

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,14 @@ function parseOutput<T>(result: CliResult): T {
 beforeAll(async () => {
   const result = await execute(tscEntryPoint, ["-b", cliTsconfig, "--pretty", "false"]);
   expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+  const bundleDirectory = join(repositoryRoot, "bundle");
+  await mkdir(bundleDirectory, { recursive: true });
+  for (const name of ["agentflow-cli.mjs", "agentflow-mcp.mjs"]) {
+    await writeFile(join(bundleDirectory, name), "#!/usr/bin/env node\n", { flag: "wx" })
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+  }
 });
 
 afterEach(async () => {
@@ -62,6 +70,90 @@ afterEach(async () => {
 });
 
 describe("agentflow CLI", () => {
+  it("runs setup for one host and optionally starts the first Run", async () => {
+    const projectRoot = await createTemporaryProject();
+    const result = parseOutput<{
+      hosts: string[];
+      run?: { requirement: string; activeStageId: string | null };
+    }>(await runCli(
+      projectRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills",
+      "--start",
+      "Build a notes app"
+    ));
+
+    expect(result.hosts).toEqual(["codex"]);
+    expect(result.run).toMatchObject({
+      requirement: "Build a notes app",
+      activeStageId: "S00"
+    });
+    const currentRun = JSON.parse(await readFile(
+      join(projectRoot, ".agentflow/current-run.json"),
+      "utf8"
+    )) as { runId: string };
+    expect(currentRun).toHaveProperty("runId");
+
+    const resumed = parseOutput<{
+      run?: { id: string; requirement: string; activeStageId: string | null };
+    }>(await runCli(
+      projectRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills",
+      "--start",
+      "Do not create a second Run"
+    ));
+    expect(resumed.run).toMatchObject({
+      id: currentRun.runId,
+      requirement: "Build a notes app",
+      activeStageId: "S00"
+    });
+    expect(await readdir(join(projectRoot, ".agentflow", "runs")))
+      .toHaveLength(1);
+  });
+
+  it("rejects setup options that cannot have an effect", async () => {
+    const projectRoot = await createTemporaryProject();
+    for (const args of [
+      ["--no-ui"],
+      ["--project-type", "existing"]
+    ]) {
+      const result = await runCli(
+        projectRoot,
+        "setup",
+        "--host",
+        "codex",
+        "--skip-external-skills",
+        ...args
+      );
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stderr)).toMatchObject({
+        error: "SETUP_OPTION_REQUIRES_START"
+      });
+    }
+
+    const dryStart = await runCli(
+      projectRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills",
+      "--dry-run",
+      "--start",
+      "Do not write"
+    );
+    expect(dryStart.exitCode).toBe(1);
+    expect(JSON.parse(dryStart.stderr)).toMatchObject({
+      error: "SETUP_DRY_RUN_START_CONFLICT"
+    });
+    await expect(readFile(join(projectRoot, ".agentflow", "current-run.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("initializes a project and starts a selected run", async () => {
     const projectRoot = await createTemporaryProject();
     const initialized = parseOutput<{ initialized: boolean; directory: string }>(await runCli(projectRoot, "init"));
@@ -228,7 +320,16 @@ describe("agentflow CLI", () => {
     );
     expect(repeated).toMatchObject({ written: false, alreadyPresent: true });
 
-    const blocked = await runCli(projectRoot, "doctor", "--host", "codex", "--stage", "S04");
+    const setupRoot = await createTemporaryProject();
+    parseOutput(await runCli(
+      setupRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills"
+    ));
+
+    const blocked = await runCli(setupRoot, "doctor", "--host", "codex", "--stage", "S04");
     expect(blocked.exitCode).toBe(1);
     expect(JSON.parse(blocked.stdout)).toMatchObject({
       ok: false,
@@ -253,7 +354,7 @@ describe("agentflow CLI", () => {
       status: string;
       capabilities: { missing: string[]; available: string[] };
     }>(await runCli(
-      projectRoot,
+      setupRoot,
       "doctor",
       "--host",
       "codex",

@@ -1,4 +1,4 @@
-import { access, readFile } from "node:fs/promises";
+import { access, lstat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stageById, type PipelineDefinition } from "@agentflow/core";
@@ -97,6 +97,21 @@ export function hostConfigurationSpec(client: HostClient, projectRoot: string): 
     client,
     projectRoot,
     agentflowMcpEntryPoint: resolveAgentFlowMcpEntryPoint(projectRoot)
+  };
+}
+
+export function durableAgentFlowMcpEntryPoint(projectRoot: string): string {
+  return resolve(projectRoot, ".agentflow", "runtime", "bin", "agentflow-mcp.mjs");
+}
+
+function durableHostConfigurationSpec(
+  client: HostClient,
+  projectRoot: string
+): HostConfigurationSpec {
+  return {
+    client,
+    projectRoot,
+    agentflowMcpEntryPoint: durableAgentFlowMcpEntryPoint(projectRoot)
   };
 }
 
@@ -215,9 +230,96 @@ async function inspectHostConfig(
       `host-config.${item.id}`,
       item.ok ? "ok" : "blocked",
       item.detail,
-      item.ok ? undefined : `Repair ${plan.targetPath}; agentflow configure will not overwrite a conflicting file.`
+      item.ok ? undefined : `Repair ${plan.targetPath}, then rerun agentflow setup --host ${spec.client}.`
     ));
   }
+}
+
+async function inspectTextSurface(
+  checks: DoctorCheck[],
+  id: string,
+  path: string,
+  valid: (content: string) => boolean,
+  remediation: string
+): Promise<void> {
+  try {
+    const stats = await lstat(path);
+    const content = stats.isFile() ? await readFile(path, "utf8") : "";
+    const ok = stats.isFile() && valid(content);
+    checks.push(check(
+      id,
+      ok ? "ok" : "blocked",
+      ok ? `${path} is installed` : `${path} is missing required AgentFlow content`,
+      ok ? undefined : remediation
+    ));
+  } catch (error) {
+    checks.push(check(
+      id,
+      "blocked",
+      `Cannot inspect ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      remediation
+    ));
+  }
+}
+
+async function inspectAutomaticRouting(
+  paths: ProjectPaths,
+  host: HostClient | undefined,
+  checks: DoctorCheck[]
+): Promise<void> {
+  const runtimePath = durableAgentFlowMcpEntryPoint(paths.projectRoot);
+  await inspectTextSurface(
+    checks,
+    "durable-mcp-runtime",
+    runtimePath,
+    (content) => content.length > 0,
+    "Run agentflow setup for the current host to install the durable MCP runtime."
+  );
+  await inspectTextSurface(
+    checks,
+    "auto-router-skill",
+    resolve(paths.projectRoot, ".agents", "skills", "agentflow-auto-router", "SKILL.md"),
+    (content) => /name:\s*agentflow-auto-router\b/.test(content),
+    "Run agentflow setup to install the agentflow-auto-router Skill."
+  );
+
+  const agentsPath = resolve(paths.projectRoot, "AGENTS.md");
+  await inspectTextSurface(
+    checks,
+    "auto-router-agents",
+    agentsPath,
+    (content) => content.includes("agentflow:auto-router:start"),
+    "Run agentflow setup to install the managed AGENTS.md routing block."
+  );
+
+  if (!host) return;
+  const instruction = (() => {
+    switch (host) {
+      case "codex":
+        return {
+          path: agentsPath,
+          valid: (content: string) => content.includes("agentflow:auto-router:start")
+        };
+      case "cursor":
+        return {
+          path: resolve(paths.projectRoot, ".cursor", "rules", "agentflow.mdc"),
+          valid: (content: string) => /alwaysApply:\s*true/.test(content)
+            && content.includes("agentflow-auto-router")
+        };
+      case "vscode":
+        return {
+          path: resolve(paths.projectRoot, ".github", "copilot-instructions.md"),
+          valid: (content: string) => content.includes("agentflow:auto-router:start")
+        };
+    }
+  })();
+  await inspectTextSurface(
+    checks,
+    `auto-router-instruction.${host}`,
+    instruction.path,
+    instruction.valid,
+    `Run agentflow setup --host ${host} to install the host instruction surface.`
+  );
 }
 
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
@@ -230,6 +332,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     nodeMajor >= 20 ? undefined : "Install Node.js 20 or newer."
   ));
   await inspectProjectConfiguration(options.paths, checks);
+  await inspectAutomaticRouting(options.paths, options.host, checks);
 
   let pipeline: PipelineDefinition | undefined;
   try {
@@ -243,20 +346,19 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ));
   }
 
-  const mcpEntryPoint = resolveAgentFlowMcpEntryPoint(options.paths.projectRoot);
-  const mcpBuilt = await pathExists(mcpEntryPoint);
-  checks.push(check(
-    "agentflow-mcp-entry",
-    mcpBuilt ? "ok" : "blocked",
-    mcpBuilt ? mcpEntryPoint : `${mcpEntryPoint} is missing`,
-    mcpBuilt ? undefined : "Run npm run build before configuring the host."
-  ));
-
   await inspectSkillLock(options.paths, checks);
 
   if (options.host) {
-    const spec = hostConfigurationSpec(options.host, options.paths.projectRoot);
+    const spec = durableHostConfigurationSpec(options.host, options.paths.projectRoot);
     await inspectHostConfig(planHostConfiguration(spec), spec, checks);
+    if (!checks.some((item) => item.status === "blocked" || item.status === "needs_user")) {
+      checks.push(check(
+        "host-restart-auth",
+        "warn",
+        "Static setup is healthy; host restart and Figma OAuth cannot be verified from project files",
+        planHostConfiguration(spec).authentication.instructions
+      ));
+    }
   }
 
   let required: string[] = [];
