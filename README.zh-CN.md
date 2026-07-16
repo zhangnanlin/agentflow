@@ -2,113 +2,122 @@
 
 # AgentFlow
 
-AgentFlow 用于在同一个 Codex、Cursor 或 VS Code 客户端中，通过一个 Supervisor 对话和多个职责受限的 Worker 对话，协调一条可恢复的软件交付流水线。
+AgentFlow 在 Codex、Cursor 或 VS Code 中，用一个 Supervisor 任务和多个有边界的 Worker 任务协同执行可恢复的软件交付流水线。每个用户只需全局安装一次；仓库只会在第一次收到项目变更需求时创建轻量状态。
 
-## 前置条件
+## 一次安装
 
-- Node.js 20 或更高版本
-- Git
-- Codex、Cursor 或 VS Code
-- 一个允许创建文件的项目目录
-
-在项目根目录执行：
+前置条件：Node.js 20 或更高版本、Git，以及 Codex、Cursor 或 VS Code。
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex
+npx --yes github:zhangnanlin/agentflow setup --host codex
 ```
 
-按需将 `codex` 替换为 `cursor`、`vscode` 或 `all`。`v0.2.0` 标签会一直等到 Release Gate 获得批准后才创建并推送；届时，这条命令才会成为提供给朋友使用的稳定入口。
-
-Setup 会在 `.agentflow/runtime/` 下安装独立运行时，复制已审查的 Skills，安全合并项目级 MCP 配置，并安装持久化的自动路由指令。它不会写入 token、OAuth 凭据或 Authorization header。
-
-Setup 完成后：
-
-1. 如果所选客户端没有自动重新加载项目指令和 MCP 配置，请重启该客户端。
-2. 准备执行 UI 阶段时，在客户端中完成由 Figma 管理的 OAuth 授权。
-3. 像平常一样输入需求，无需再提及 `agentflow-orchestrator`。
-
-## 自动路由
-
-凡是预期结果会修改项目的请求，都会进入或恢复 AgentFlow。这包括新项目、功能、缺陷修复、重构、测试、文档、配置、迁移、设计工作和发布。
-
-以下请求不会进入 AgentFlow：
-
-- 纯问答
-- 代码解释
-- 只读检查
-- 状态查询
-- 不修改项目的简单命令
-
-`agentflow:on` 可强制当前一次请求进入 AgentFlow，`agentflow:off` 可让当前一次请求绕过 AgentFlow。两者都不会影响后续请求。
-
-开始编辑前，路由器会检查 `.agentflow/current-run.json` 或 AgentFlow 状态。若存在尚未完成的 Run，它会恢复该 Run，而不会重复创建。Requirements、Design Direction、Design Freeze、Engineering Plan 和 Release Gate 仍然必须由用户明确批准。
-
-Skills 和 MCP 工具只会在当前 Pipeline Stage 声明需要时加载。非 UI 项目或只读问题不会调用 Figma，已配置 Figma server 也不会被当作实时认证成功的证据。
-
-## Setup 选项
-
-安装全部三种客户端配置：
+按需把 `codex` 换成 `cursor`、`vscode`，也可以一次配置全部宿主：
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host all
+npx --yes github:zhangnanlin/agentflow setup --host all
 ```
 
-不切换当前目录，直接指定另一个项目：
+不带 Git selector 的命令会跟随仓库当前默认分支。需要可复现安装时，请只使用已经通过 AgentFlow Release Gate 并实际发布的不可变 tag。
+
+全局 Setup 会安装：
+
+- `~/.agentflow` 下的 CLI、MCP bundle、锁文件和 `install.json`
+- `~/.agents/skills` 下的 AgentFlow Skills 与已审查的外部 Skills
+- `$CODEX_HOME/config.toml` 中的 Codex MCP 配置，默认路径为 `~/.codex/config.toml`
+- `~/.cursor/mcp.json` 中的 Cursor MCP 配置
+- 当前平台对应的 VS Code 用户级 `mcp.json`
+
+Setup 只合并 `agentflow` 与 `figma` server 条目，保留无关设置，也不会写入 token、OAuth 凭据或 Authorization header。首次安装后重启宿主；只有 UI Stage 需要 Figma 时，才在该宿主中完成一次 OAuth。
+
+## 项目首次使用
+
+在任意仓库中直接输入普通需求即可，不需要粘贴 AgentFlow 专用提示词。
+
+对于会修改项目的请求，路由器会先使用原始需求调用 `run_start_or_resume`，之后才允许其他状态变更。该调用会恢复尚未完成的 Run，或创建轻量控制文件并且只启动一个新 Run。纯问答、代码解释、只读检查、状态查询和简单非写命令不会初始化仓库。
+
+懒初始化只创建类似下面的项目状态：
+
+```text
+.agentflow/
+  .gitignore
+  config.yaml
+  pipeline.yaml
+  current-run.json
+  runs/
+  start-requests/
+```
+
+它不会把 runtime、Skills、路由指令或宿主配置复制进项目，也不会修改项目根目录的 `.gitignore`。
+
+`agentflow:on` 只强制当前请求进入流水线，`agentflow:off` 只让当前请求绕过流水线。需求、设计方向、设计冻结、工程计划与发布 Gate 仍必须由用户明确批准。
+
+## 多项目并发
+
+同一个全局 MCP 可执行文件可以服务多个项目，不存在全局项目队列。每次工具调用都会解析一个不可变的项目上下文；每个仓库分别拥有自己的 Run 状态与 `.agentflow/.start.lock`。项目 A 和项目 B 可以并发初始化和执行，只有同一项目内互相竞争的首次调用会短暂串行。
+
+项目根解析优先级为：
+
+1. 兼容模式中的固定 `--project-root` 或 `AGENTFLOW_PROJECT_ROOT`
+2. MCP 调用中显式提供的绝对 `projectRoot`
+3. 客户端暴露的唯一 workspace root
+4. Git 顶层目录
+5. MCP 进程工作目录
+
+客户端暴露 multiple workspace roots 时，调用方必须传入显式的绝对 `projectRoot`。AgentFlow 会直接拒绝含糊请求，不会猜目录，也不会将请求排队等待猜测。
+
+## Setup 与 Doctor
+
+只校验全局安装计划，不写文件：
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 \
-  --project-root /absolute/project/path setup --host codex
+npx --yes github:zhangnanlin/agentflow setup --host codex --dry-run
 ```
 
-仅校验文件系统写入计划，不写入文件：
+按需覆盖用户级路径：
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex --dry-run
+AGENTFLOW_HOME=/absolute/runtime/path \
+CODEX_HOME=/absolute/codex/path \
+npx --yes github:zhangnanlin/agentflow setup --host codex
+
+npx --yes github:zhangnanlin/agentflow setup --host vscode \
+  --vscode-config /absolute/profile/mcp.json
 ```
 
-在安装完成后立即启动第一个 Run：
+`--vscode-config` 必须是绝对路径。Windows 同样使用 `AGENTFLOW_HOME` 与 `CODEX_HOME` 这两个环境变量名。
+
+针对某个项目运行全局 Doctor：
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex \
-  --start "Build a small team project manager" \
-  --project-type new
+node ~/.agentflow/bin/agentflow-cli.mjs \
+  --project-root /absolute/project/path doctor --host codex
 ```
 
-非 UI Run 请添加 `--no-ui`。`--project-type` 和 `--no-ui` 必须与 `--start` 一起使用；`--dry-run` 不能与 `--start` 组合。只有在已通过其他方式管理获批外部 Skills 时，才应使用 `--skip-external-skills`。
+Doctor 分别输出 `installation` 与 `project`。第一次变更前的 `project.status: not-initialized` 是健康状态；已经存在但损坏的 config、pipeline 或 Run 状态会阻断。静态检查健康时仍可能为 `warn`，因为重启状态与 Figma OAuth 必须通过宿主现场证据确认。
 
-Dry-run 不会修改项目，因此静态 doctor 状态会报告为 `ok: null, skipped: true`。正常执行 Setup 后，再使用已安装的 doctor 验证最终项目。
+## 项目级兼容模式
 
-Setup 是幂等的。重复执行会更新 AgentFlow 管理的区块，保留无关指令和 MCP servers，并返回当前未完成的 Run，而不是另建一个 Run。
-
-Setup 输出的 JSON 包含持久运行时路径、已安装 Skill 名称、固定依赖提交，以及每个所选客户端的一份静态 doctor 报告。任何 doctor 报告处于阻断状态时，Setup 都不会启动 Run。
-
-## 验证与恢复
-
-在目标项目中运行已安装的 doctor：
+AgentFlow 0.2 的项目内安装仍可显式使用：
 
 ```bash
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host codex
+npx --yes github:zhangnanlin/agentflow \
+  --project-root /absolute/project/path setup --scope project --host codex
 ```
 
-健康的静态报告仍可能是 `warn`，因为仅凭文件无法证明编辑器已经重启或 Figma OAuth 已完成。在 S04 开始前，Supervisor 必须探测客户端的实时工具注册表、加载 `figma-use` 并调用 Figma `whoami`；缺少能力证据时，只会阻断依赖这些能力的设计阶段。
+项目级模式保留固定根 runtime、Skills、路由文件、宿主配置，以及 `--start`、`--project-type`、`--no-ui` 行为。全局模式会拒绝这些项目级启动参数。
 
-Setup 会在写入前计算并校验全部目标路径。遇到冲突的 `agentflow` 或 `figma` server、内容不同的同名 Skill、损坏的受管标记、符号链接或路径逃逸时，它会中止。写入使用同目录临时文件；如果后续写入失败，本次调用已经完成的写入会被回滚。
+宿主通常让项目配置优先于用户配置，因此旧版 0.2 仓库会继续使用固定根 server，直到用户移除 AgentFlow 管理的项目级宿主条目。
 
-修复报告中的冲突后，重新执行同一条 Setup 命令即可。已有 Run 状态和已完成 Artifacts 会保留。各客户端的 OAuth、诊断、恢复和手动回滚方式见 [Host Setup](./docs/HOST_SETUP.md)。
+## 从 0.2 迁移
 
-## 安装内容
+1. 为目标宿主执行全局 Setup，然后重启宿主。
+2. 对仓库运行全局 Doctor，确认全局 runtime、路由 Skill 与用户级宿主配置。
+3. 保留 `.agentflow/config.yaml`、`.agentflow/pipeline.yaml`、`.agentflow/current-run.json` 和完整的 `.agentflow/runs/` 历史。
+4. 确认全局 server 能正确解析仓库后，再删除旧的 AgentFlow 项目级 MCP 条目。
+5. 确认没有活跃流程依赖后，才按需删除旧项目 runtime、复制的 Skills 与托管路由块。
 
-- `.agentflow/runtime/bin/agentflow-cli.mjs`
-- `.agentflow/runtime/bin/agentflow-mcp.mjs`
-- 不存在时创建 `.agentflow/config.yaml` 和 `.agentflow/pipeline.yaml`
-- `.agents/skills/agentflow-*`
-- `skills-lock.json` 声明并固定版本的 Superpowers Skills
-- `AGENTS.md` 中的受管路由区块
-- Cursor 使用的 `.cursor/rules/agentflow.mdc`
-- VS Code 使用的 `.github/copilot-instructions.md`
-- `.codex/config.toml`、`.cursor/mcp.json` 或 `.vscode/mcp.json`
-
-生成的运行时文件和本机 MCP 配置会被 Git 忽略。可移植的路由指令与 AgentFlow Skills 可以经过审查后提交到项目仓库。
+全局 Setup 不会扫描仓库，也不会删除项目文件。完整路径、回滚、OAuth、多根处理和迁移步骤见 [Host Setup](./docs/HOST_SETUP.md)。
 
 ## 贡献者开发
 
@@ -120,24 +129,12 @@ npm run build
 npm run build:distribution
 ```
 
-从源码运行命令：
+源码兼容命令：
 
 ```bash
-npm run cli -- setup --host codex --skip-external-skills
+npm run cli -- setup --scope project --host codex --skip-external-skills
 npm run cli -- status
 npm run mcp -- --project-root /absolute/project/path
 ```
 
-根 package 暴露独立的 `agentflow` bin。`prepare` 会重新构建 `bundle/agentflow-cli.mjs` 和 `bundle/agentflow-mcp.mjs`；打包后的运行时不依赖尚未发布的 `@agentflow/*` workspace packages。
-
-## 架构
-
-- `@agentflow/core`：持久化 Run、Stage、Task、Worker、Artifact、资源、preflight 和 Gate 不变量。
-- `@agentflow/cli`：Setup、初始化、诊断和操作命令。
-- `@agentflow/mcp-server`：通过 stdio 提供 Supervisor 与 Worker 状态工具。
-- `@agentflow/host-adapter`：可移植 Worker contract 与 Codex 原生桥接。
-- `.agents/skills/`：各 Stage 的执行规范，包括 `agentflow-auto-router` 和 `agentflow-orchestrator`。
-
-Pipeline `0.4.0` 让带类型的证据贯穿需求发现、架构、实现、集成、QA、发布计划和最终验证。Codex 原生 Worker 执行已经过验证。Cursor 和 VS Code 的持久化配置已经实现，但它们的原生 Worker 执行仍是明确的待验证边界。实时 Figma 证据也仍需等待已认证且暴露所需工具的客户端环境。
-
-完整项目约定和当前边界见 [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md)。
+根 package 暴露独立的 `agentflow` bin，打包后的 bundle 不依赖未发布的 workspace package。完整的 Pipeline、状态、Worker、Artifact 与 Gate 契约见 [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md)。

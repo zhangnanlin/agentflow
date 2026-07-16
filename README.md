@@ -2,113 +2,122 @@
 
 # AgentFlow
 
-AgentFlow coordinates a resumable software-delivery pipeline across one Supervisor conversation and multiple bounded Worker conversations in the same Codex, Cursor, or VS Code client.
+AgentFlow coordinates a resumable software-delivery pipeline across one Supervisor task and bounded Worker tasks in Codex, Cursor, or VS Code. Install it once for your user account; each repository receives only lightweight state when its first project-changing request arrives.
 
-## Prerequisites
+## Install Once
 
-- Node.js 20 or newer
-- Git
-- Codex, Cursor, or VS Code
-- A project directory in which you can create files
-
-From the project root, run:
+Prerequisites: Node.js 20 or newer, Git, and Codex, Cursor, or VS Code.
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex
+npx --yes github:zhangnanlin/agentflow setup --host codex
 ```
 
-Use `cursor`, `vscode`, or `all` instead of `codex` when appropriate. The `v0.2.0` tag is intentionally pending until the release Gate is approved; the command becomes the stable friend-facing entry point after that tag is pushed.
-
-Setup installs a standalone runtime under `.agentflow/runtime/`, copies reviewed Skills, safely merges project-scoped MCP configuration, and installs persistent automatic-routing instructions. It never writes a token, OAuth credential, or Authorization header.
-
-After setup:
-
-1. Restart the selected host if it does not reload project instructions and MCP configuration automatically.
-2. Complete host-owned Figma OAuth when you intend to run a UI Stage.
-3. Enter an ordinary requirement. You do not need to mention `agentflow-orchestrator`.
-
-## Automatic Routing
-
-Every request whose requested outcome changes the project enters or resumes AgentFlow. This includes new projects, features, bug fixes, refactors, tests, documentation, configuration, migrations, design work, and releases.
-
-These requests bypass AgentFlow:
-
-- Pure questions
-- Code explanation
-- Read-only inspection
-- Status lookup
-- Simple commands that do not modify the project
-
-`agentflow:on` forces routing for one request. `agentflow:off` bypasses routing for one request. Neither token changes future requests.
-
-Before editing, the router checks `.agentflow/current-run.json` or AgentFlow status. An unfinished Run is resumed instead of duplicated. Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates still require explicit human approval.
-
-Skills and MCP tools are loaded only when the active Pipeline Stage declares them. Figma is not called for a non-UI project or a read-only question, and a configured Figma server is not treated as live authentication evidence.
-
-## Setup Options
-
-Install every host surface:
+Use `cursor`, `vscode`, or `all` for another host:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host all
+npx --yes github:zhangnanlin/agentflow setup --host all
 ```
 
-Target another project without changing directories:
+The command without a Git selector follows the repository's current default branch. For a reproducible installation, use an immutable release tag only after that tag has passed the AgentFlow Release Gate and is published.
+
+Global setup installs:
+
+- CLI, MCP bundle, lock data, and `install.json` under `~/.agentflow`
+- AgentFlow and reviewed external Skills under `~/.agents/skills`
+- Codex MCP configuration at `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`
+- Cursor MCP configuration at `~/.cursor/mcp.json`
+- VS Code user `mcp.json` for the current platform
+
+It merges only the `agentflow` and `figma` server entries, preserves unrelated settings, and never writes tokens, OAuth credentials, or authorization headers. Restart the selected host after first setup, then complete Figma OAuth once in that host when a UI Stage needs it.
+
+## First Project Use
+
+Enter an ordinary requirement in any repository. The installed router classifies the request automatically; you do not need to paste an AgentFlow prompt.
+
+For a project-changing request, it calls `run_start_or_resume` with the original requirement before other state mutations. The call either resumes the unfinished Run or initializes lightweight project control files and starts one Run. Pure questions, code explanation, read-only inspection, status lookup, and simple non-mutating commands do not initialize the repository.
+
+Lazy initialization creates only project state such as:
+
+```text
+.agentflow/
+  .gitignore
+  config.yaml
+  pipeline.yaml
+  current-run.json
+  runs/
+  start-requests/
+```
+
+It does not copy the runtime, Skills, routing instructions, or host configuration into the project, and it does not edit the root `.gitignore`.
+
+`agentflow:on` forces routing for one request. `agentflow:off` bypasses it for one request. Human Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates remain explicit.
+
+## Multiple Projects
+
+One global MCP executable can serve multiple projects without a global queue. Each tool call resolves an immutable project context, and each repository owns its Run state and `.agentflow/.start.lock`. Project A and project B can initialize and execute concurrently; only competing first-use calls inside the same project serialize briefly.
+
+Resolution priority is:
+
+1. Fixed `--project-root` or `AGENTFLOW_PROJECT_ROOT` compatibility root
+2. Explicit absolute `projectRoot` in the MCP call
+3. One client workspace root
+4. Git top-level directory
+5. MCP process working directory
+
+When a client exposes multiple workspace roots, the caller must pass an explicit absolute `projectRoot`. AgentFlow fails closed instead of guessing or queueing the request.
+
+## Setup And Doctor
+
+Validate global setup without writing:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 \
-  --project-root /absolute/project/path setup --host codex
+npx --yes github:zhangnanlin/agentflow setup --host codex --dry-run
 ```
 
-Validate the filesystem plan without writing:
+Override user paths when needed:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex --dry-run
+AGENTFLOW_HOME=/absolute/runtime/path \
+CODEX_HOME=/absolute/codex/path \
+npx --yes github:zhangnanlin/agentflow setup --host codex
+
+npx --yes github:zhangnanlin/agentflow setup --host vscode \
+  --vscode-config /absolute/profile/mcp.json
 ```
 
-Install and start the first Run in one command:
+`--vscode-config` must be absolute. On Windows, `AGENTFLOW_HOME` and `CODEX_HOME` use the same environment-variable names.
+
+Run the globally installed doctor for a project:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex \
-  --start "Build a small team project manager" \
-  --project-type new
+node ~/.agentflow/bin/agentflow-cli.mjs \
+  --project-root /absolute/project/path doctor --host codex
 ```
 
-Add `--no-ui` for a non-UI Run. `--project-type` and `--no-ui` require `--start`; `--dry-run` cannot be combined with `--start`. Use `--skip-external-skills` only when approved external Skills are already managed separately.
+Doctor reports independent `installation` and `project` sections. `project.status: not-initialized` is healthy before first changing use; malformed existing config, pipeline, or Run state is blocking. A healthy static report may still be `warn` because restart and Figma OAuth require live host evidence.
 
-Dry-run does not mutate the project, so static doctor checks are reported as `ok: null, skipped: true`. Run Setup normally, then use the installed doctor to verify the resulting project.
+## Project Scope Compatibility
 
-Setup is idempotent. Re-running it updates AgentFlow-owned blocks, preserves unrelated instructions and MCP servers, and returns the current unfinished Run rather than creating another one.
-
-The setup JSON includes durable runtime paths, installed Skill names, pinned dependency commits, and one static doctor report per selected host. Setup does not start a Run when any doctor report is blocked.
-
-## Verify And Recover
-
-Run the installed doctor from the target project:
+AgentFlow 0.2 project-contained installation remains available explicitly:
 
 ```bash
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host codex
+npx --yes github:zhangnanlin/agentflow \
+  --project-root /absolute/project/path setup --scope project --host codex
 ```
 
-A healthy static report may remain `warn` because an editor restart and Figma OAuth cannot be proven from files. Before S04, the Supervisor must probe the live host registry, load `figma-use`, and call Figma `whoami`; missing capability evidence blocks only the dependent design Stage.
+Project scope keeps fixed-root runtime, Skills, routing files, host configuration, `--start`, `--project-type`, and `--no-ui` behavior. Global setup rejects those project-only start options.
 
-Setup computes and validates every destination before writing. It aborts on conflicting `agentflow` or `figma` servers, different same-name Skills, malformed managed markers, symbolic links, and path escapes. Writes use same-directory temporary files and rollback this invocation if a later write fails.
+Existing project MCP configuration normally takes precedence over user configuration, so a 0.2 repository remains fixed to its project server until its AgentFlow-owned project host entry is removed.
 
-Rerun the same setup command after repairing a reported conflict. Existing Run state and completed Artifacts remain intact. See [Host Setup](./docs/HOST_SETUP.md) for host-specific OAuth, diagnostics, recovery, and manual rollback.
+## Migrate From 0.2
 
-## What Gets Installed
+1. Run global setup for the host and restart it.
+2. Run global doctor against the repository and confirm the global runtime, router Skill, and user host configuration.
+3. Keep `.agentflow/config.yaml`, `.agentflow/pipeline.yaml`, `.agentflow/current-run.json`, and the entire `.agentflow/runs/` history.
+4. Remove old AgentFlow-owned project MCP entries only after confirming the global server resolves that repository correctly.
+5. Optionally remove the old project runtime, copied Skills, and managed routing blocks after confirming no active workflow depends on them.
 
-- `.agentflow/runtime/bin/agentflow-cli.mjs`
-- `.agentflow/runtime/bin/agentflow-mcp.mjs`
-- `.agentflow/config.yaml` and `.agentflow/pipeline.yaml` when absent
-- `.agents/skills/agentflow-*`
-- Pinned Superpowers Skills declared by `skills-lock.json`
-- `AGENTS.md` managed routing block
-- `.cursor/rules/agentflow.mdc` for Cursor
-- `.github/copilot-instructions.md` for VS Code
-- `.codex/config.toml`, `.cursor/mcp.json`, or `.vscode/mcp.json`
-
-Generated runtime and machine MCP files are ignored by Git. Portable routing instructions and AgentFlow Skills can be reviewed and committed with the project.
+Global setup never scans repositories and never removes project files. See [Host Setup](./docs/HOST_SETUP.md) for exact paths, rollback, OAuth, multi-root handling, and migration details.
 
 ## Contributors
 
@@ -120,24 +129,12 @@ npm run build
 npm run build:distribution
 ```
 
-Run source commands with:
+Source compatibility commands:
 
 ```bash
-npm run cli -- setup --host codex --skip-external-skills
+npm run cli -- setup --scope project --host codex --skip-external-skills
 npm run cli -- status
 npm run mcp -- --project-root /absolute/project/path
 ```
 
-The root package exposes the standalone `agentflow` bin. `prepare` rebuilds `bundle/agentflow-cli.mjs` and `bundle/agentflow-mcp.mjs`; the packaged runtime has no dependency on unpublished `@agentflow/*` workspace packages.
-
-## Architecture
-
-- `@agentflow/core`: persistent Run, Stage, Task, Worker, Artifact, resource, preflight, and Gate invariants.
-- `@agentflow/cli`: setup, initialization, diagnostics, and operator commands.
-- `@agentflow/mcp-server`: Supervisor and Worker state tools over stdio.
-- `@agentflow/host-adapter`: portable Worker contract and Codex native bridge.
-- `.agents/skills/`: Stage-specific operating contracts, including `agentflow-auto-router` and `agentflow-orchestrator`.
-
-Pipeline `0.4.0` carries typed evidence from discovery through architecture, implementation, integration, QA, release planning, and final verification. Codex native Worker execution has been exercised. Cursor and VS Code persistent configuration is implemented, while their native Worker execution remains an explicit validation boundary. Live Figma evidence also remains blocked until an authenticated host exposes the required tools.
-
-See [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md) for the complete project contract and current boundaries.
+The root package exposes the standalone `agentflow` bin. Packaged bundles do not depend on unpublished workspace packages. See [AGENTFLOW_PROJECT_SPEC.md](./AGENTFLOW_PROJECT_SPEC.md) for the full pipeline, state, Worker, Artifact, and Gate contract.

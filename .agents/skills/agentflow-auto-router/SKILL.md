@@ -20,14 +20,14 @@ Read [references/routing-contract.md](references/routing-contract.md) when the r
 
 ## Route
 
-1. Inspect `.agentflow/current-run.json` or call AgentFlow `status_get` before starting work.
-2. If an unfinished Run exists, resume that Run. Never create a duplicate Run for the same ongoing requirement.
-3. If no unfinished Run exists, preserve the user's original requirement exactly and start the appropriate new/existing-project and UI/non-UI profile.
-4. Load `agentflow-orchestrator` and let it coordinate the staged workflow and bounded Workers.
+1. Resolve the project for this request. When the host exposes multiple workspace roots, pass the intended absolute `projectRoot` on this and every later AgentFlow MCP call. Never guess a root or store a mutable global current project.
+2. Call `run_start_or_resume` before any other AgentFlow state mutation. Pass the user's original requirement, the new/existing project classification, the UI classification, and a stable request key. This is the only tool allowed to initialize a missing project.
+3. Treat the returned project root and Run state as authoritative. Continue the returned unfinished Run rather than creating a duplicate; use the same explicit root for `pipeline_get`, `status_get`, and all later tools.
+4. Load `agentflow-orchestrator` and let it coordinate the active Stage, bounded Workers, verified Artifacts, and human Gates.
 5. Preserve every human Gate. Never infer approval from silence or from a previous, unrelated approval.
 
-Do not edit project files, dispatch implementation Workers, or skip directly to a later Stage before the Supervisor has established or resumed the Run.
+Do not edit project files, dispatch implementation Workers, or skip directly to a later Stage before `run_start_or_resume` has established or resumed the Run. Locks are project-local, so independent projects may proceed concurrently.
 
 ## Bypass
 
-When the decision is bypass, handle the request normally without creating, mutating, or resuming an AgentFlow Run. Override tokens apply only to the current user request and do not change future routing.
+When the decision is bypass, handle the request normally without calling `run_start_or_resume`, creating project state, mutating a Run, or loading the orchestrator. Read-only MCP tools may report `PROJECT_NOT_INITIALIZED`; that is not permission to initialize. Override tokens apply only to the current user request and do not change future routing.

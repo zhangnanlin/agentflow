@@ -1,162 +1,148 @@
 # AgentFlow Host Setup
 
-AgentFlow configures a local AgentFlow MCP server and Figma Remote MCP for the selected editor, but invokes tools only when the active Pipeline Stage requires them. Static configuration is never accepted as proof that a conversation is authenticated.
+This guide covers user-global installation, host OAuth, dynamic project resolution, diagnostics, compatibility, migration, and rollback for Codex, Cursor, and VS Code.
 
-## One-Command Setup
+## Global Setup
 
-Run from the target project root:
+Install AgentFlow once for the current user:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.2.0 setup --host codex
+npx --yes github:zhangnanlin/agentflow setup --host codex
 ```
 
-| Host | Setup value | MCP target | Persistent instruction |
-| --- | --- | --- | --- |
-| Codex | `codex` | `.codex/config.toml` | managed block in `AGENTS.md` |
-| Cursor | `cursor` | `.cursor/mcp.json` | `.cursor/rules/agentflow.mdc` |
-| VS Code | `vscode` | `.vscode/mcp.json` | managed block in `.github/copilot-instructions.md` |
+Use `cursor`, `vscode`, or `all` for another host. Run the same command again to update AgentFlow-owned files while preserving unrelated Skills and host settings. Preview the complete validated write plan with `--dry-run`.
 
-Use `--host all` to install all three. The generated MCP files contain the current project's absolute path and are ignored by Git.
+The unversioned GitHub command follows the repository's current default branch. Use an immutable tag only after that exact release has passed the Release Gate and has been published.
 
-The installer copies standalone binaries to:
+### User Paths
 
-```text
-.agentflow/runtime/bin/agentflow-cli.mjs
-.agentflow/runtime/bin/agentflow-mcp.mjs
-```
+| Surface | Default path |
+| --- | --- |
+| Runtime, lock, manifest | `~/.agentflow` |
+| CLI | `~/.agentflow/bin/agentflow-cli.mjs` |
+| MCP server | `~/.agentflow/bin/agentflow-mcp.mjs` |
+| Personal Skills | `~/.agents/skills` |
+| Codex config | `$CODEX_HOME/config.toml`, default `~/.codex/config.toml` |
+| Cursor config | `~/.cursor/mcp.json` |
+| VS Code on Windows | `%APPDATA%/Code/User/mcp.json` |
+| VS Code on macOS | `~/Library/Application Support/Code/User/mcp.json` |
+| VS Code on Linux | `${XDG_CONFIG_HOME:-~/.config}/Code/User/mcp.json` |
 
-Host configuration always invokes the durable project copy of `agentflow-mcp.mjs`. It does not point back to the AgentFlow source repository or require unpublished workspace packages.
+Set `AGENTFLOW_HOME` to move the global runtime, `CODEX_HOME` to select another Codex profile, or pass an absolute `--vscode-config` for a named or portable VS Code profile.
 
-## Safe Merge Rules
+The installed AgentFlow MCP entry has no `--project-root`. Global setup never writes runtime, Skills, instructions, or host configuration into a repository.
 
-Setup parses Cursor and VS Code JSON structurally, preserves unrelated top-level keys and servers, and adds only missing `agentflow` and `figma` entries. Codex TOML is parsed before AgentFlow-owned server tables are added inside managed markers.
+## Merge And Transaction Rules
 
-Setup stops before mutation when:
+Setup structurally merges only the `agentflow` and `figma` MCP entries. It preserves unrelated TOML/JSON settings and servers. It rejects malformed configuration, conflicting managed servers, different same-name Skills, path traversal, linked parents, changed targets, and unsafe overwrite races.
 
-- An existing `agentflow` or `figma` server has different values.
-- A same-name Skill contains different files.
-- A managed marker is missing, duplicated, or reversed.
-- A source or destination traverses a symbolic link or escapes its allowed root.
-- Distribution assets or the pinned Superpowers commit cannot be verified.
+Every destination carries an exact user-owned safety root. Setup validates all destinations before the first write, uses same-directory temporary files and atomic rename, then restores this invocation's prior bytes in reverse order if a later write fails. Rollback refuses to overwrite a file another process changed during recovery.
 
-There is no delete-and-regenerate requirement. Repair only the reported conflict and rerun the same command. Every target is read and validated before writes begin; changed files use same-directory atomic rename, and a failure rolls this invocation back in reverse order.
+`~/.agentflow/install.json` records non-secret version, bundle or revision identity, runtime paths, selected hosts, installed Skill names, and pinned commits. It never contains tokens, OAuth credentials, headers, or environment secrets.
 
 ## Host Authentication
 
-OAuth remains a user and host action. AgentFlow does not click Allow Access, select an account/team, bypass Workspace Trust, restart an editor, or persist credentials.
+AgentFlow configures Figma as `https://mcp.figma.com/mcp` without credentials and without making it globally required. Authentication is host-owned and needed only when an active Stage declares Figma capabilities.
 
 ### Codex
 
-Restart Codex if the project MCP list does not refresh, then authenticate:
-
-```bash
-codex mcp login figma
-codex mcp list
-```
-
-Do not set `required = true` for Figma. A Figma outage must block the design Stage, not every Codex session.
+1. Run global setup with `--host codex`.
+2. Restart Codex if it does not reload the user MCP configuration.
+3. Authenticate through the MCP server list or `codex mcp login figma`.
+4. Before S04, inspect the live tool registry and call Figma `whoami`.
 
 ### Cursor
 
-Restart Cursor, open MCP settings, and connect the generated `figma` server. Depending on the installed Cursor CLI, these diagnostics may also be available:
-
-```bash
-agent mcp login figma
-agent mcp list
-agent mcp list-tools figma
-```
+1. Run global setup with `--host cursor`.
+2. Restart Cursor if needed.
+3. Connect Figma in MCP settings or use the host's MCP login command.
+4. Confirm the live Figma tools before S04.
 
 ### VS Code
 
-Restart VS Code if necessary, run `MCP: List Servers`, start `figma`, and complete Allow Access. AgentFlow writes only project configuration and does not guess a user Profile path.
+1. Run global setup with `--host vscode` and, for non-default profiles, an absolute `--vscode-config`.
+2. Reload the VS Code window.
+3. Run `MCP: List Servers`, start Figma, and complete Allow Access.
+4. Confirm the live Figma tools before S04.
 
-## Static Doctor
+Static configuration is not proof of restart or OAuth. AgentFlow records those uncertainties as warnings and blocks only a Stage whose declared capabilities are missing.
 
-Use the durable CLI installed in the project:
+## Project Resolution
 
-```bash
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host codex
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host cursor
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor --host vscode
-```
+The global MCP server resolves an immutable project context for each call in this order:
 
-Doctor verifies:
+1. Fixed `--project-root` or `AGENTFLOW_PROJECT_ROOT` supplied when the MCP process starts
+2. Explicit absolute `projectRoot` supplied to the tool call
+3. Exactly one file workspace root advertised by the client
+4. Git top-level directory for the MCP working directory
+5. MCP working directory
 
-- Node.js 20 or newer
-- Git is available on `PATH`
-- `.agentflow` config and Pipeline
-- Durable MCP runtime
-- `agentflow-auto-router/SKILL.md`
-- Shared `AGENTS.md` routing block
-- Selected host's native instruction surface
-- MCP transport, command, arguments, and Figma URL
-- Absence of token/header fields
-- Pinned Figma Skill metadata
+Accepted roots are canonical existing directories. An explicit root must remain inside an advertised workspace when client roots are available. Non-file URIs, relative paths, files, missing directories, and boundary escapes fail closed.
 
-When these checks pass, `status: warn` is expected until restart/OAuth is confirmed in the host. `ok: true` means the static project setup is usable; it does not mean Figma has been probed live.
+When the client advertises multiple workspace roots, pass the intended absolute `projectRoot` on `run_start_or_resume` and every later AgentFlow call. AgentFlow does not guess and does not put ambiguous projects into a queue.
 
-## S04 Live Preflight
+One MCP process can handle independent projects concurrently. State, request records, journals, and `.agentflow/.start.lock` belong to each project. Only competing first-use operations in the same project serialize briefly.
 
-Immediately before a Figma Writer is dispatched, the Supervisor inspects the current host tool and Skill registry, loads `figma-use`, calls Figma `whoami`, and reports canonical capability IDs to `stage_preflight_report`.
+## Lazy Initialization
 
-The default S04 contract requires:
+For every project-changing request, the automatic router calls `run_start_or_resume` before another state mutation. It supplies the original requirement, new/existing classification, UI classification, and a stable request key. The operation either resumes the unfinished Run or creates one new Run.
+
+On first use, it creates lightweight state only:
 
 ```text
-host.worker.spawn
-host.worker.collect
-figma.remote.connected
-figma.remote.authenticated
-figma.tool.whoami
-figma.tool.create_new_file
-figma.tool.use_figma
-figma.tool.get_metadata
-figma.tool.get_screenshot
-skill.figma-use
+.agentflow/
+  .gitignore
+  config.yaml
+  pipeline.yaml
+  current-run.json
+  runs/
+  start-requests/
 ```
 
-A local diagnostic can consume observations collected from the live host:
+The operation is project-locked, journaled, idempotent, and crash-recoverable. It does not edit the root `.gitignore`. Read-only calls never initialize a missing project and return `PROJECT_NOT_INITIALIZED` when project state is required.
+
+## Doctor
+
+Run doctor from the global runtime while naming the project:
 
 ```bash
-node .agentflow/runtime/bin/agentflow-cli.mjs doctor \
-  --host codex --stage S04 --live-probe \
-  --capability host.worker.spawn host.worker.collect \
-  figma.remote.connected figma.remote.authenticated \
-  figma.tool.whoami figma.tool.create_new_file figma.tool.use_figma \
-  figma.tool.get_metadata figma.tool.get_screenshot skill.figma-use
+node ~/.agentflow/bin/agentflow-cli.mjs \
+  --project-root /absolute/project/path doctor --host codex
 ```
 
-If a capability is missing, Core retains completed briefs and Artifact hashes, blocks S04, creates no Figma Writer or design Artifact, and resumes the same Stage after a fresh passing probe.
+The report contains:
 
-## Automatic Router Diagnostics
+- `installation`: Node, Git, global CLI/MCP, manifest, lock, router Skill, selected user host config, and restart/OAuth warnings
+- `project`: resolved root and `initialized`, `not-initialized`, or `invalid` evidence for config, pipeline, and current Run
 
-If a project-changing request does not enter AgentFlow:
+`not-initialized` is non-blocking before first changing use. An existing malformed `.agentflow` directory is blocking and is never replaced automatically.
 
-1. Run doctor for the current host.
-2. Confirm the native instruction file is visible to the editor.
-3. Restart the editor after setup or instruction changes.
-4. Confirm `.agentflow/current-run.json` points to the expected unfinished Run.
-5. Use `agentflow:on` on one request to test forced routing.
+For a Stage capability check, add `--stage`, `--live-probe`, and canonical `--capability` values collected from the current host. Provider-qualified live tools and Skills count; arbitrary lookalike names do not.
 
-If a read-only request unexpectedly routes, confirm it does not request a later edit and use `agentflow:off` for one request. Override tokens never persist.
+## Project Scope Compatibility
 
-## Recovery And Rollback
+Use explicit project scope when repository-contained AgentFlow 0.2 behavior is required:
 
-Setup is idempotent, so retrying the same pinned command is the normal recovery path. It preserves existing Run data under `.agentflow/runs/`.
+```bash
+npx --yes github:zhangnanlin/agentflow \
+  --project-root /absolute/project/path setup --scope project --host codex
+```
 
-For a manual uninstall or release rollback:
+Project scope retains `.agentflow/runtime`, copied Skills, managed instruction surfaces, project host configuration, fixed MCP roots, and the optional `--start`, `--project-type`, and `--no-ui` flow. The MCP executable also continues to accept a fixed `--project-root` or `AGENTFLOW_PROJECT_ROOT`.
 
-1. Remove only the `agentflow:auto-router` managed block from `AGENTS.md` and `.github/copilot-instructions.md`.
-2. Remove `.cursor/rules/agentflow.mdc` if Cursor was configured.
-3. Structurally remove only the `agentflow` and `figma` MCP entries; preserve every unrelated host setting.
-4. Remove `.agentflow/runtime/` and AgentFlow-owned Skills only when no active Run or other project instruction depends on them.
-5. Restore committed portable instruction files with the project's normal Git workflow.
+Project host configuration normally takes precedence over user configuration. Therefore an existing 0.2 repository continues to use its fixed-root server until its AgentFlow-owned project server entry is removed.
 
-Never delete `.agentflow/runs/` as part of an installer rollback unless the user explicitly intends to destroy Run history.
+## Migration And Rollback
 
-## Sources
+To migrate a 0.2 repository:
 
-- [Figma Remote MCP installation](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/)
-- [Figma MCP tools and prompts](https://developers.figma.com/docs/figma-mcp-server/tools-and-prompts/)
-- [Codex MCP configuration](https://developers.openai.com/codex/mcp/)
-- [Cursor MCP documentation](https://cursor.com/docs/mcp)
-- [VS Code MCP servers](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
+1. Run global setup and restart/authenticate the host.
+2. Run global doctor against the repository.
+3. Confirm that a changing request resolves the intended root and resumes the expected Run.
+4. Preserve `.agentflow/config.yaml`, `.agentflow/pipeline.yaml`, `.agentflow/current-run.json`, and all `.agentflow/runs/` data.
+5. Remove the old AgentFlow-owned project host entry so the user-level dynamic server takes precedence.
+6. Optionally remove old project runtime, copied Skills, and managed instruction blocks only after confirming nothing still depends on them.
+
+Global setup never scans or deletes repositories. Never delete `.agentflow/runs/` during migration or rollback.
+
+To roll back the global installation manually, first stop host MCP processes. Back up `~/.agentflow/install.json`, remove only the global AgentFlow runtime and AgentFlow-owned Skills listed there, and structurally remove only the `agentflow` and `figma` entries that point to that runtime from selected user configs. Preserve unrelated host settings and Skills. Restore the previous files from backup if any check fails.

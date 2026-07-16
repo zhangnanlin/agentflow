@@ -9,11 +9,11 @@ Keep the AgentFlow state store, not chat history, as the source of truth. Act as
 
 ## Start Or Resume
 
-1. Check for `.agentflow/current-run.json`.
-2. If no run exists, initialize the project and start a run with the exact user requirement, project type, and UI classification. Use the AgentFlow CLI because run creation is an operator action.
-3. Call `pipeline_get` and `status_get`. Read the active Stage, revision, Tasks, Artifacts, and Gates before deciding anything.
+1. Accept the project root and Run returned by `run_start_or_resume` as the source of truth. If this Skill is invoked directly for a project-changing request without that result, call `run_start_or_resume` once with the original requirement before any other mutation.
+2. Use the same per-call project context for `pipeline_get`, `status_get`, and every later tool. When the host exposes multiple workspace roots, pass the intended absolute `projectRoot` explicitly; never maintain a mutable global current project.
+3. Read the active Stage, revision, Tasks, Workers, Artifacts, and Gates. Resume existing ready or running work instead of duplicating it.
 4. Probe the host Thread Adapter capabilities before dispatch. In Codex, load `agentflow-codex-host-bridge`; use native subagents or background tasks first, public host APIs second, and an Agent CLI process only as a declared fallback. Never automate chat windows through GUI clicks.
-5. Resume existing ready or running work instead of duplicating it.
+5. Keep independent projects independent. Project lifecycle locks serialize only competing first-use operations within one root; they are not a cross-project queue.
 
 ## Drive One Stage
 

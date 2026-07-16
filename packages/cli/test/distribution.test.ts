@@ -95,6 +95,45 @@ describe("standalone AgentFlow distribution", () => {
     expect(builder).toContain("fileURLToPath(import.meta.url)");
   });
 
+  it("documents unversioned global setup and lazy project routing", async () => {
+    const [english, chinese, hostSetup, projectSpec, routerSkill, routingContract, orchestratorSkill] = await Promise.all([
+      readFile(resolve(repositoryRoot, "README.md"), "utf8"),
+      readFile(resolve(repositoryRoot, "README.zh-CN.md"), "utf8"),
+      readFile(resolve(repositoryRoot, "docs/HOST_SETUP.md"), "utf8"),
+      readFile(resolve(repositoryRoot, "AGENTFLOW_PROJECT_SPEC.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/SKILL.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/references/routing-contract.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-orchestrator/SKILL.md"), "utf8")
+    ]);
+    const primaryCommand = "npx --yes github:zhangnanlin/agentflow setup --host codex";
+
+    for (const readme of [english, chinese]) {
+      expect(readme).toContain(primaryCommand);
+      expect(readme).toContain("setup --host all");
+      expect(readme).toContain("--scope project");
+      expect(readme).toContain("AGENTFLOW_HOME");
+      expect(readme).toContain("CODEX_HOME");
+      expect(readme).toContain("--vscode-config");
+      expect(readme).not.toContain("github:zhangnanlin/agentflow#v0.2.0 setup");
+    }
+    expect(english).not.toContain("Setup installs a standalone runtime under `.agentflow/runtime/`");
+    expect(chinese).not.toContain("Setup 会在 `.agentflow/runtime/` 下安装独立运行时");
+
+    expect(routerSkill).toContain("run_start_or_resume");
+    expect(routerSkill).toContain("multiple workspace roots");
+    expect(routerSkill).toContain("absolute `projectRoot`");
+    expect(routingContract).toContain("run_start_or_resume");
+    expect(orchestratorSkill).toContain("per-call project");
+    expect(orchestratorSkill).toContain("run_start_or_resume");
+
+    for (const documentation of [hostSetup, projectSpec]) {
+      expect(documentation).toContain("~/.agentflow");
+      expect(documentation).toContain("~/.agents/skills");
+      expect(documentation).toContain("--scope project");
+      expect(documentation).toContain("run_start_or_resume");
+    }
+  });
+
   it("sets up and diagnoses an external project and packs only portable assets", async () => {
     await execFileAsync(process.execPath, [
       resolve(repositoryRoot, "scripts/build-distribution.mjs")
