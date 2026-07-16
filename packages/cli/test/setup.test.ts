@@ -2,6 +2,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   symlink,
@@ -11,6 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DistributionAssets } from "../src/distribution.js";
+import {
+  globalInstallationPaths,
+  type GlobalPathEnvironment
+} from "../src/global-paths.js";
 import { executeSetup, resolveSetupDestination } from "../src/setup.js";
 
 const temporaryDirectories: string[] = [];
@@ -42,6 +47,14 @@ async function fakeDistributionAssets(root: string): Promise<DistributionAssets>
   return { root: distribution, cliBundle, mcpBundle, skillsDirectory, skillsLockPath };
 }
 
+function globalEnvironment(home: string): GlobalPathEnvironment {
+  return {
+    platform: process.platform,
+    home,
+    ...(process.platform === "win32" ? { appData: join(home, "AppData", "Roaming") } : {})
+  };
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => (
     rm(directory, { recursive: true, force: true })
@@ -49,6 +62,195 @@ afterEach(async () => {
 });
 
 describe("AgentFlow setup", () => {
+  it("installs runtime, Skills, manifest, and all host configs globally without touching the project", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-setup-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    const options = {
+      scope: "global" as const,
+      projectRoot,
+      hosts: ["all" as const],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    };
+
+    const first = await executeSetup(options, { globalPathEnvironment: environment });
+    expect(first.runtime).toEqual({ cli: paths.runtimeCli, mcp: paths.runtimeMcp });
+    expect(first.installedSkills).toEqual(["agentflow-auto-router"]);
+    expect(await readFile(paths.runtimeMcp, "utf8")).toContain("#!/usr/bin/env node");
+    expect(await readFile(join(paths.skillsRoot, "agentflow-auto-router", "SKILL.md"), "utf8"))
+      .toContain("name: agentflow-auto-router");
+    expect(await readdir(projectRoot)).toEqual([]);
+
+    const codex = await readFile(paths.codexConfig, "utf8");
+    const cursor = await readFile(paths.cursorConfig, "utf8");
+    const vscode = await readFile(paths.vscodeConfig, "utf8");
+    for (const configuration of [codex, cursor, vscode]) expect(configuration).not.toContain("--project-root");
+
+    const manifestSource = await readFile(paths.installManifest, "utf8");
+    const manifest = JSON.parse(manifestSource) as Record<string, unknown>;
+    expect(manifest).toMatchObject({
+      schemaVersion: 1,
+      hosts: ["codex", "cursor", "vscode"],
+      skills: ["agentflow-auto-router"]
+    });
+    expect(manifestSource).not.toMatch(/token|secret|authorization|credential/i);
+
+    const second = await executeSetup(options, { globalPathEnvironment: environment });
+    expect(second.created).toEqual([]);
+    expect(second.updated).toEqual([]);
+    expect(second.unchanged.length).toBeGreaterThan(0);
+  });
+
+  it("plans global setup without writing during dry-run", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-dry-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+
+    const result = await executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["all"],
+      assets: await fakeDistributionAssets(sandbox),
+      dryRun: true,
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment });
+
+    expect(result.planned.length).toBeGreaterThan(0);
+    expect(result.planned).toContain(paths.runtimeMcp);
+    await expect(readFile(paths.runtimeMcp)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(projectRoot)).toEqual([]);
+  });
+
+  it("does not require or create a project root for global setup", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-no-project-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "does-not-exist");
+    await mkdir(home);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+
+    await expect(executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment })).resolves.toMatchObject({
+      runtime: { mcp: paths.runtimeMcp }
+    });
+    await expect(readFile(join(projectRoot, "anything"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves unrelated user Skills and Codex configuration", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-preserve-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    const unrelatedSkill = join(paths.skillsRoot, "team-skill", "SKILL.md");
+    await mkdir(join(paths.skillsRoot, "team-skill"), { recursive: true });
+    await mkdir(join(paths.codexConfig, ".."), { recursive: true });
+    await writeFile(unrelatedSkill, "team owned\n");
+    await writeFile(paths.codexConfig, "model = \"gpt-test\"\n", "utf8");
+
+    await executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment });
+
+    expect(await readFile(unrelatedSkill, "utf8")).toBe("team owned\n");
+    expect(await readFile(paths.codexConfig, "utf8")).toContain("model = \"gpt-test\"");
+    expect(await readdir(projectRoot)).toEqual([]);
+  });
+
+  it("rejects a linked global Skills parent before any write", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-link-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    const outside = join(sandbox, "outside-skills");
+    await Promise.all([mkdir(home), mkdir(projectRoot), mkdir(outside)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    await symlink(
+      outside,
+      join(home, ".agents"),
+      process.platform === "win32" ? "junction" : "dir"
+    );
+
+    await expect(executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment })).rejects.toMatchObject({ code: "SETUP_PATH_ESCAPE" });
+    await expect(readFile(paths.runtimeMcp)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(projectRoot)).toEqual([]);
+  });
+
+  it("rejects a conflicting global Skill before writing runtime files", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-collision-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    const collision = join(paths.skillsRoot, "agentflow-auto-router");
+    await mkdir(collision, { recursive: true });
+    await writeFile(join(collision, "SKILL.md"), "different Skill\n");
+
+    await expect(executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment })).rejects.toMatchObject({ code: "SKILL_COLLISION" });
+    await expect(readFile(paths.runtimeMcp)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rolls back writes across global roots when a later rename fails", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-rollback-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    let renameCount = 0;
+
+    await expect(executeSetup({
+      scope: "global",
+      projectRoot,
+      hosts: ["all"],
+      assets: await fakeDistributionAssets(sandbox),
+      skipExternalSkills: true
+    }, {
+      globalPathEnvironment: environment,
+      fileSystem: {
+        rename: async (source, destination) => {
+          renameCount += 1;
+          if (renameCount === 4) throw new Error("injected global rename failure");
+          await rename(source, destination);
+        }
+      }
+    })).rejects.toThrow("injected global rename failure");
+
+    await expect(readFile(paths.runtimeCli)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(paths.runtimeMcp)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(projectRoot)).toEqual([]);
+  });
+
   it("creates runtime, Skills, host config, and automatic routing idempotently", async () => {
     const root = await temporaryDirectory("agentflow-setup-");
     const assets = await fakeDistributionAssets(root);

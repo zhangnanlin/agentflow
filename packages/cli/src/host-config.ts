@@ -8,7 +8,7 @@ export const FIGMA_REMOTE_MCP_URL = "https://mcp.figma.com/mcp";
 export interface HostConfigurationSpec {
   client: HostClient;
   agentflowMcpEntryPoint: string;
-  projectRoot: string;
+  projectRoot?: string;
   nodeCommand?: string;
 }
 
@@ -85,7 +85,7 @@ function validateSpec(spec: HostConfigurationSpec): void {
   if (!isAbsolute(spec.agentflowMcpEntryPoint)) {
     throw new TypeError("agentflowMcpEntryPoint must be an absolute path");
   }
-  if (!isAbsolute(spec.projectRoot)) {
+  if (spec.projectRoot !== undefined && !isAbsolute(spec.projectRoot)) {
     throw new TypeError("projectRoot must be an absolute path");
   }
   if (spec.nodeCommand !== undefined && spec.nodeCommand.trim().length === 0) {
@@ -98,7 +98,9 @@ function nodeCommand(spec: HostConfigurationSpec): string {
 }
 
 function agentflowArgs(spec: HostConfigurationSpec): string[] {
-  return [spec.agentflowMcpEntryPoint, "--project-root", spec.projectRoot];
+  return spec.projectRoot === undefined
+    ? [spec.agentflowMcpEntryPoint]
+    : [spec.agentflowMcpEntryPoint, "--project-root", spec.projectRoot];
 }
 
 function renderJsonConfiguration(value: JsonRecord): string {
@@ -162,6 +164,9 @@ export function hostConfigurationTarget(client: HostClient, projectRoot: string)
 }
 
 export function planHostConfiguration(spec: HostConfigurationSpec): HostConfigurationPlan {
+  if (spec.projectRoot === undefined) {
+    throw new TypeError("projectRoot is required to plan a project-scoped host target");
+  }
   const targetPath = hostConfigurationTarget(spec.client, spec.projectRoot);
   const authentication = (() => {
     switch (spec.client) {

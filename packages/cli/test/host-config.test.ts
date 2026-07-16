@@ -18,6 +18,10 @@ function spec(client: HostClient): HostConfigurationSpec {
   return { client, agentflowMcpEntryPoint, projectRoot };
 }
 
+function globalSpec(client: HostClient): HostConfigurationSpec {
+  return { client, agentflowMcpEntryPoint };
+}
+
 function check(inspection: ReturnType<typeof inspectHostConfiguration>, id: string) {
   return inspection.checks.find((candidate) => candidate.id === id);
 }
@@ -69,6 +73,25 @@ describe("host MCP configuration", () => {
       }
     });
     expect(rendered).not.toMatch(/"headers"|"token"|"authorization"/i);
+  });
+
+  it("renders user-global host configurations without a fixed project root", () => {
+    const codex = renderHostConfiguration(globalSpec("codex"));
+    const cursor = JSON.parse(renderHostConfiguration(globalSpec("cursor"))) as {
+      mcpServers: { agentflow: { args: string[] } };
+    };
+    const vscode = JSON.parse(renderHostConfiguration(globalSpec("vscode"))) as {
+      servers: { agentflow: { args: string[] } };
+    };
+
+    expect(codex).toContain(`args = [${JSON.stringify(agentflowMcpEntryPoint)}]`);
+    expect(codex).not.toContain("--project-root");
+    expect(cursor.mcpServers.agentflow.args).toEqual([agentflowMcpEntryPoint]);
+    expect(vscode.servers.agentflow.args).toEqual([agentflowMcpEntryPoint]);
+    for (const client of ["codex", "cursor", "vscode"] as const) {
+      const rendered = renderHostConfiguration(globalSpec(client));
+      expect(inspectHostConfiguration(globalSpec(client), rendered).ok).toBe(true);
+    }
   });
 
   it("accepts each rendered host configuration", () => {

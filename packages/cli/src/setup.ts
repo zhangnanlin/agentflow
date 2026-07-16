@@ -13,13 +13,18 @@ import {
   writeFile
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { AgentFlowError, defaultPipeline } from "@agentflow/core";
+import { AgentFlowError, defaultPipeline, sha256 } from "@agentflow/core";
 import { stringify as stringifyYaml } from "yaml";
 import { renderAgentsInstruction, renderCursorRule, renderVsCodeInstruction } from "./auto-router.js";
 import type { DistributionAssets } from "./distribution.js";
 import { mergeHostConfiguration } from "./host-config-merge.js";
+import {
+  globalInstallationPaths,
+  type GlobalPathEnvironment,
+  type GlobalPathOverrides
+} from "./global-paths.js";
 import {
   hostConfigurationTarget,
   type HostClient,
@@ -28,16 +33,23 @@ import {
 
 export interface PlannedFile {
   path: string;
+  safetyRoot: string;
   content: Uint8Array;
   source?: string;
 }
 
+type PlannedFileInput = Omit<PlannedFile, "safetyRoot"> & { safetyRoot?: string };
+
+export type SetupScope = "global" | "project";
+
 export interface SetupOptions {
   projectRoot: string;
+  scope?: SetupScope;
   hosts: (HostClient | "all")[];
   assets: DistributionAssets;
   dryRun?: boolean;
   skipExternalSkills?: boolean;
+  vscodeConfig?: string;
 }
 
 export interface SetupResult {
@@ -65,6 +77,10 @@ export interface SetupDependencies {
   fileSystem?: Partial<SetupFileSystem>;
   gitRunner?: GitRunner;
   nodeVersion?: string;
+  globalPathEnvironment?: GlobalPathEnvironment;
+  globalPathOverrides?: GlobalPathOverrides;
+  distributionVersion?: string;
+  distributionRevision?: string;
 }
 
 export interface GitRunResult {
@@ -183,13 +199,36 @@ export function resolveSetupDestination(projectRoot: string, destination: string
 }
 
 async function assertNoLinkedDestination(
-  projectRoot: string,
+  safetyRoot: string,
   target: string
 ): Promise<void> {
-  await assertRealDirectory(projectRoot, "Setup path root");
-  const pathFromRoot = relative(projectRoot, target);
-  let current = projectRoot;
-  for (const segment of pathFromRoot.split(sep).filter((value) => value.length > 0)) {
+  const root = resolve(safetyRoot);
+  const destination = resolve(target);
+  const pathFromRoot = relative(root, destination);
+  if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+    throw new AgentFlowError(
+      `Setup destination escapes its safety root: ${destination}`,
+      "SETUP_PATH_ESCAPE",
+      { safetyRoot: root, target: destination }
+    );
+  }
+
+  let anchor = root;
+  while (true) {
+    try {
+      await assertRealDirectory(anchor, "Setup path ancestor");
+      break;
+    } catch (error) {
+      if (!(error instanceof AgentFlowError) || error.code !== "SETUP_PATH_ESCAPE") throw error;
+      const parent = dirname(anchor);
+      if (parent === anchor) throw error;
+      anchor = parent;
+    }
+  }
+
+  let current = anchor;
+  const pathFromAnchor = relative(anchor, destination);
+  for (const segment of pathFromAnchor.split(sep).filter((value) => value.length > 0)) {
     current = resolve(current, segment);
     try {
       const stats = await lstat(current);
@@ -197,7 +236,14 @@ async function assertNoLinkedDestination(
         throw new AgentFlowError(
           `Setup destination contains a symbolic link: ${current}`,
           "SETUP_PATH_ESCAPE",
-          { projectRoot, target, linkedPath: current }
+          { safetyRoot: root, target: destination, linkedPath: current }
+        );
+      }
+      if (current !== destination && !stats.isDirectory()) {
+        throw new AgentFlowError(
+          `Setup destination has a non-directory parent: ${current}`,
+          "SETUP_PATH_ESCAPE",
+          { safetyRoot: root, target: destination, parentPath: current }
         );
       }
     } catch (error) {
@@ -340,18 +386,20 @@ function assertSkillName(skillName: string): void {
 async function plannedSkillFiles(
   skillName: string,
   sourceRoot: string,
-  projectRoot: string
+  destinationSkillsRoot: string,
+  safetyRoot: string
 ): Promise<PlannedFile[]> {
   assertSkillName(skillName);
   const destinationRoot = resolveSetupDestination(
-    projectRoot,
-    join(".agents", "skills", skillName)
+    destinationSkillsRoot,
+    skillName
   );
-  await assertNoLinkedDestination(projectRoot, destinationRoot);
+  await assertNoLinkedDestination(safetyRoot, destinationRoot);
   const sourceFiles = await collectFiles(sourceRoot);
   await assertCompatibleSkill(skillName, sourceFiles, destinationRoot);
   return sourceFiles.map((file) => ({
     path: resolveSetupDestination(destinationRoot, file.relativePath),
+    safetyRoot,
     content: file.content,
     source: file.path
   }));
@@ -360,7 +408,8 @@ async function plannedSkillFiles(
 async function agentFlowSkillFiles(
   skillsDirectory: string,
   assetsRoot: string,
-  projectRoot: string
+  destinationSkillsRoot: string,
+  safetyRoot: string
 ): Promise<PlannedFile[]> {
   resolveSetupDestination(assetsRoot, skillsDirectory);
   await assertNoLinkedDestination(assetsRoot, skillsDirectory);
@@ -384,7 +433,12 @@ async function agentFlowSkillFiles(
     }
     if (!entry.isDirectory()) continue;
     const sourceRoot = resolve(skillsDirectory, entry.name);
-    planned.push(...await plannedSkillFiles(entry.name, sourceRoot, projectRoot));
+    planned.push(...await plannedSkillFiles(
+      entry.name,
+      sourceRoot,
+      destinationSkillsRoot,
+      safetyRoot
+    ));
   }
   return planned;
 }
@@ -468,7 +522,8 @@ function lockedSuperpowers(content: Uint8Array): LockedSuperpowersDependency {
 
 async function externalSkillFiles(
   lockContent: Uint8Array,
-  projectRoot: string,
+  destinationSkillsRoot: string,
+  safetyRoot: string,
   gitRunner: GitRunner
 ): Promise<PlannedFile[]> {
   const dependency = lockedSuperpowers(lockContent);
@@ -494,7 +549,12 @@ async function externalSkillFiles(
         join("skills", skillName)
       );
       await assertNoLinkedDestination(checkout, sourceRoot);
-      planned.push(...await plannedSkillFiles(skillName, sourceRoot, projectRoot));
+      planned.push(...await plannedSkillFiles(
+        skillName,
+        sourceRoot,
+        destinationSkillsRoot,
+        safetyRoot
+      ));
     }
     return planned;
   } finally {
@@ -510,6 +570,169 @@ async function existingText(projectRoot: string, path: string): Promise<string> 
     : new TextDecoder("utf-8", { ignoreBOM: true }).decode(content);
 }
 
+function nativeGlobalPathEnvironment(): GlobalPathEnvironment {
+  return {
+    platform: process.platform,
+    home: homedir(),
+    ...(process.env.APPDATA === undefined ? {} : { appData: process.env.APPDATA }),
+    ...(process.env.XDG_CONFIG_HOME === undefined ? {} : { xdgConfigHome: process.env.XDG_CONFIG_HOME }),
+    ...(process.env.AGENTFLOW_HOME === undefined ? {} : { agentflowHome: process.env.AGENTFLOW_HOME }),
+    ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME })
+  };
+}
+
+function requiredAction(host: HostClient): string {
+  switch (host) {
+    case "codex": return "Restart Codex if needed and authenticate Figma with `codex mcp login figma`.";
+    case "cursor": return "Restart Cursor if needed and authenticate Figma from MCP settings.";
+    case "vscode": return "Restart VS Code if needed, start Figma from MCP: List Servers, and complete Allow Access.";
+  }
+}
+
+async function planGlobalSetup(
+  options: SetupOptions,
+  dependencies: SetupDependencies,
+  projectRoot: string,
+  hosts: HostClient[],
+  gitRunner: GitRunner
+): Promise<SetupPlan> {
+  const environment = dependencies.globalPathEnvironment ?? nativeGlobalPathEnvironment();
+  const overrides: GlobalPathOverrides = {
+    ...dependencies.globalPathOverrides,
+    ...(options.vscodeConfig === undefined ? {} : { vscodeConfig: options.vscodeConfig })
+  };
+  const paths = globalInstallationPaths(environment, overrides);
+  await assertRealDirectory(paths.home, "Global setup home");
+  try {
+    await access(paths.home, fsConstants.R_OK | fsConstants.W_OK);
+  } catch (error) {
+    throw new AgentFlowError(
+      `Global setup home is not readable and writable: ${paths.home}`,
+      "SETUP_GLOBAL_HOME_INACCESSIBLE",
+      { home: paths.home, cause: error instanceof Error ? error.message : String(error) }
+    );
+  }
+
+  const files: PlannedFile[] = [];
+  const snapshots = new Map<string, Uint8Array | undefined>();
+  const destinations = new Set<string>();
+  const add = async (file: PlannedFile): Promise<void> => {
+    const safetyRoot = resolve(file.safetyRoot);
+    const path = resolveSetupDestination(safetyRoot, file.path);
+    await assertNoLinkedDestination(safetyRoot, path);
+    if (destinations.has(path)) {
+      throw new AgentFlowError(
+        `Setup planned the same destination twice: ${path}`,
+        "SETUP_PLAN_DUPLICATE",
+        { path }
+      );
+    }
+    destinations.add(path);
+    snapshots.set(path, await readOptional(path));
+    files.push({ ...file, path, safetyRoot });
+  };
+
+  const cliContent = await readDistributionFile(options.assets.root, options.assets.cliBundle);
+  const mcpContent = await readDistributionFile(options.assets.root, options.assets.mcpBundle);
+  const lockContent = await readDistributionFile(options.assets.root, options.assets.skillsLockPath);
+  const resolvedPinnedCommits = pinnedCommits(lockContent);
+  await add({
+    path: paths.runtimeCli,
+    safetyRoot: paths.runtimeRoot,
+    content: cliContent,
+    source: options.assets.cliBundle
+  });
+  await add({
+    path: paths.runtimeMcp,
+    safetyRoot: paths.runtimeRoot,
+    content: mcpContent,
+    source: options.assets.mcpBundle
+  });
+  await add({
+    path: paths.skillsLock,
+    safetyRoot: paths.runtimeRoot,
+    content: lockContent,
+    source: options.assets.skillsLockPath
+  });
+
+  for (const skillFile of await agentFlowSkillFiles(
+    options.assets.skillsDirectory,
+    options.assets.root,
+    paths.skillsRoot,
+    paths.skillsRoot
+  )) {
+    await add(skillFile);
+  }
+  if (!options.skipExternalSkills) {
+    for (const skillFile of await externalSkillFiles(
+      lockContent,
+      paths.skillsRoot,
+      paths.skillsRoot,
+      gitRunner
+    )) {
+      await add(skillFile);
+    }
+  }
+
+  const installedSkills = [...new Set(files.flatMap((file) => {
+    const pathFromSkills = relative(paths.skillsRoot, file.path);
+    if (pathFromSkills === ".." || pathFromSkills.startsWith(`..${sep}`)
+      || isAbsolute(pathFromSkills)) return [];
+    const [skillName] = pathFromSkills.split(sep);
+    return skillName ? [skillName] : [];
+  }))].sort();
+
+  const hostPaths: Record<HostClient, string> = {
+    codex: paths.codexConfig,
+    cursor: paths.cursorConfig,
+    vscode: paths.vscodeConfig
+  };
+  for (const host of hosts) {
+    const hostPath = hostPaths[host];
+    const safetyRoot = dirname(hostPath);
+    await add({
+      path: hostPath,
+      safetyRoot,
+      content: text(mergeHostConfiguration(
+        host,
+        await existingText(safetyRoot, hostPath),
+        { client: host, agentflowMcpEntryPoint: paths.runtimeMcp }
+      ))
+    });
+  }
+
+  const manifest = {
+    schemaVersion: 1,
+    version: dependencies.distributionVersion ?? "0.2.0",
+    ...(dependencies.distributionRevision === undefined
+      ? { bundleHashes: { cli: sha256(cliContent), mcp: sha256(mcpContent) } }
+      : { revision: dependencies.distributionRevision }),
+    runtime: { cli: paths.runtimeCli, mcp: paths.runtimeMcp },
+    skillsRoot: paths.skillsRoot,
+    skills: installedSkills,
+    pinnedCommits: resolvedPinnedCommits,
+    hosts,
+    hostConfigurations: Object.fromEntries(hosts.map((host) => [host, hostPaths[host]]))
+  };
+  await add({
+    path: paths.installManifest,
+    safetyRoot: paths.runtimeRoot,
+    content: text(`${JSON.stringify(manifest, null, 2)}\n`)
+  });
+
+  return {
+    projectRoot,
+    hosts,
+    runtime: { cli: paths.runtimeCli, mcp: paths.runtimeMcp },
+    installedSkills,
+    pinnedCommits: resolvedPinnedCommits,
+    files,
+    snapshots,
+    skipped: [],
+    requiredActions: hosts.map(requiredAction)
+  };
+}
+
 /** Build and validate the complete target write plan without mutating the project. */
 export async function planSetup(
   options: SetupOptions,
@@ -519,6 +742,11 @@ export async function planSetup(
   const gitRunner = dependencies.gitRunner ?? nativeGitRunner;
   await assertGitAvailable(gitRunner);
   const projectRoot = resolve(options.projectRoot);
+  await assertRealDirectory(options.assets.root, "Distribution root");
+  const hosts = normalizeHosts(options.hosts);
+  if ((options.scope ?? "project") === "global") {
+    return planGlobalSetup(options, dependencies, projectRoot, hosts, gitRunner);
+  }
   const rootKind = await pathIsDirectory(projectRoot);
   if (!rootKind) {
     throw new AgentFlowError(
@@ -536,17 +764,16 @@ export async function planSetup(
       { projectRoot, cause: error instanceof Error ? error.message : String(error) }
     );
   }
-  await assertRealDirectory(options.assets.root, "Distribution root");
-  const hosts = normalizeHosts(options.hosts);
   const files: PlannedFile[] = [];
   const snapshots = new Map<string, Uint8Array | undefined>();
   const skipped: string[] = [];
   const requiredActions = new Set<string>();
   const destinations = new Set<string>();
 
-  const add = async (file: PlannedFile): Promise<void> => {
-    const path = resolveSetupDestination(projectRoot, file.path);
-    await assertNoLinkedDestination(projectRoot, path);
+  const add = async (file: PlannedFileInput): Promise<void> => {
+    const safetyRoot = resolve(file.safetyRoot ?? projectRoot);
+    const path = resolveSetupDestination(safetyRoot, file.path);
+    await assertNoLinkedDestination(safetyRoot, path);
     if (destinations.has(path)) {
       throw new AgentFlowError(
         `Setup planned the same destination twice: ${path}`,
@@ -556,7 +783,7 @@ export async function planSetup(
     }
     destinations.add(path);
     snapshots.set(path, await readOptional(path));
-    files.push({ ...file, path });
+    files.push({ ...file, path, safetyRoot });
   };
 
   const agentsPath = resolveSetupDestination(projectRoot, "AGENTS.md");
@@ -599,7 +826,7 @@ export async function planSetup(
 
   const configPath = resolveSetupDestination(projectRoot, ".agentflow/config.yaml");
   const pipelinePath = resolveSetupDestination(projectRoot, ".agentflow/pipeline.yaml");
-  const defaults: PlannedFile[] = [
+  const defaults: PlannedFileInput[] = [
     {
       path: configPath,
       content: text(stringifyYaml({ version: 1, pipeline: "pipeline.yaml", runsDirectory: "runs" }))
@@ -626,9 +853,11 @@ export async function planSetup(
   }
   await add({ path: lockPath, content: lockContent, source: options.assets.skillsLockPath });
 
+  const skillsRoot = resolveSetupDestination(projectRoot, ".agents/skills");
   for (const skillFile of await agentFlowSkillFiles(
     options.assets.skillsDirectory,
     options.assets.root,
+    skillsRoot,
     projectRoot
   )) {
     await add(skillFile);
@@ -636,6 +865,7 @@ export async function planSetup(
   if (!options.skipExternalSkills) {
     for (const skillFile of await externalSkillFiles(
       lockContent,
+      skillsRoot,
       projectRoot,
       gitRunner
     )) {
@@ -661,17 +891,9 @@ export async function planSetup(
         spec
       ))
     });
-    const action = (() => {
-      switch (host) {
-        case "codex": return "Restart Codex if needed and authenticate Figma with `codex mcp login figma`.";
-        case "cursor": return "Restart Cursor if needed and authenticate Figma from MCP settings.";
-        case "vscode": return "Restart VS Code if needed, start Figma from MCP: List Servers, and complete Allow Access.";
-      }
-    })();
-    requiredActions.add(action);
+    requiredActions.add(requiredAction(host));
   }
 
-  const skillsRoot = resolveSetupDestination(projectRoot, ".agents/skills");
   const installedSkills = [...new Set(files.flatMap((file) => {
     const pathFromSkills = relative(skillsRoot, file.path);
     if (pathFromSkills === ".." || pathFromSkills.startsWith(`..${sep}`)
@@ -725,6 +947,7 @@ export async function executeSetup(
   const unchanged: string[] = [];
   const applied: Array<{
     path: string;
+    safetyRoot: string;
     previous: Uint8Array | undefined;
     content: Uint8Array;
   }> = [];
@@ -733,7 +956,7 @@ export async function executeSetup(
     try {
       for (const file of plan.files) {
         const previous = plan.snapshots.get(file.path);
-        await assertNoLinkedDestination(plan.projectRoot, file.path);
+        await assertNoLinkedDestination(file.safetyRoot, file.path);
         const current = await readOptional(file.path);
         if (!sameOptionalBytes(current, previous)) {
           throw new AgentFlowError(
@@ -747,14 +970,19 @@ export async function executeSetup(
           continue;
         }
         await atomicReplace(file.path, file.content, fileSystem);
-        applied.push({ path: file.path, previous, content: file.content });
+        applied.push({
+          path: file.path,
+          safetyRoot: file.safetyRoot,
+          previous,
+          content: file.content
+        });
         (previous === undefined ? created : updated).push(file.path);
       }
     } catch (error) {
       const rollbackErrors: string[] = [];
       for (const file of applied.reverse()) {
         try {
-          await assertNoLinkedDestination(plan.projectRoot, file.path);
+          await assertNoLinkedDestination(file.safetyRoot, file.path);
           if (!sameBytes(await readOptional(file.path), file.content)) {
             throw new AgentFlowError(
               `Setup target changed before rollback: ${file.path}`,
