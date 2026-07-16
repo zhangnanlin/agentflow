@@ -74,6 +74,11 @@ describe("S11 to S12 real Git flow", () => {
     const paths = projectPaths(directory);
     await mkdir(paths.agentflowDirectory, { recursive: true });
     await writeFile(paths.pipelinePath, stringifyYaml(pipeline), "utf8");
+    await writeFile(paths.configPath, stringifyYaml({
+      version: 1,
+      pipeline: "pipeline.yaml",
+      runsDirectory: "runs"
+    }), "utf8");
 
     await runGit(directory, ["init", "--initial-branch=main"]);
     await runGit(directory, ["config", "user.name", "AgentFlow Test"]);

@@ -39,6 +39,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
+import { assertProjectInitialized, startOrResumeRun } from "./project-lifecycle.js";
 import { ProjectRootResolver } from "./project-root.js";
 import {
   loadPipeline,
@@ -111,6 +112,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     defaultActor: Actor
   ) => {
     const paths = await pathsFor(input.projectRoot);
+    await assertProjectInitialized(paths);
     return { paths, target: await mutationTarget(paths, input, defaultActor) };
   };
 
@@ -119,7 +121,11 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     description: "Return the pipeline definition configured for this project.",
     inputSchema: projectSelectorShape,
     annotations: readAnnotations
-  }, async (input) => handleTool(async () => loadPipeline(await pathsFor(input?.projectRoot))));
+  }, async (input) => handleTool(async () => {
+    const paths = await pathsFor(input?.projectRoot);
+    await assertProjectInitialized(paths);
+    return loadPipeline(paths);
+  }));
 
   server.registerTool("status_get", {
     title: "Get AgentFlow run status",
@@ -128,8 +134,31 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     annotations: readAnnotations
   }, async (input) => handleTool(async () => {
     const paths = await pathsFor(input?.projectRoot);
+    await assertProjectInitialized(paths);
     const engine = await createEngine(paths);
     return engine.loadRun(await resolveRunId(input?.runId, paths));
+  }));
+
+  server.registerTool("run_start_or_resume", {
+    title: "Start or resume an AgentFlow Run",
+    description: "Initialize lightweight project state on first changing use, resume unfinished work, or start one new Run.",
+    inputSchema: {
+      ...projectSelectorShape,
+      requirement: z.string().min(1).max(20_000),
+      projectType: z.enum(["new", "existing"]),
+      hasUi: z.boolean(),
+      requestedRunId: IdentifierSchema.optional(),
+      requestKey: z.string().min(1).max(256)
+    }
+  }, async (input) => handleTool(async () => {
+    const paths = await pathsFor(input.projectRoot);
+    return startOrResumeRun(paths, {
+      requirement: input.requirement,
+      projectType: input.projectType,
+      hasUi: input.hasUi,
+      ...(input.requestedRunId === undefined ? {} : { requestedRunId: input.requestedRunId }),
+      requestKey: input.requestKey
+    });
   }));
 
   server.registerTool("task_create", {
@@ -405,6 +434,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     annotations: readAnnotations
   }, async ({ projectRoot, runId, workerId }) => handleTool(async () => {
     const paths = await pathsFor(projectRoot);
+    await assertProjectInitialized(paths);
     const engine = await createEngine(paths);
     const state = await engine.loadRun(await resolveRunId(runId, paths));
     const worker = state.workers[workerId];
@@ -553,6 +583,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     annotations: readAnnotations
   }, async ({ projectRoot, runId, resourceId }) => handleTool(async () => {
     const paths = await pathsFor(projectRoot);
+    await assertProjectInitialized(paths);
     const engine = await createEngine(paths);
     const state = await engine.loadRun(await resolveRunId(runId, paths));
     const resource = state.resources[resourceId];

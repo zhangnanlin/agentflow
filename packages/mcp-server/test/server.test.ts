@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -67,6 +67,11 @@ describe("AgentFlow MCP server", () => {
     const paths = projectPaths(directory);
     await mkdir(paths.agentflowDirectory, { recursive: true });
     await writeFile(paths.pipelinePath, stringifyYaml(pipeline), "utf8");
+    await writeFile(paths.configPath, stringifyYaml({
+      version: 1,
+      pipeline: "pipeline.yaml",
+      runsDirectory: "runs"
+    }), "utf8");
 
     const engine = new AgentFlowEngine(new JsonRunStore(paths.runsDirectory), pipeline);
     await engine.createRun({
@@ -109,6 +114,7 @@ describe("AgentFlow MCP server", () => {
       "resource_rekey",
       "resource_release",
       "resource_status",
+      "run_start_or_resume",
       "stage_complete",
       "stage_preflight_report",
       "stage_skip",
@@ -300,6 +306,73 @@ describe("AgentFlow MCP server", () => {
     await client.connect(fixedClientTransport);
     expect((await call(requireClient(client), "pipeline_get", { projectRoot: rootB })).structuredContent)
       .toMatchObject({ id: "pipeline-a" });
+  });
+
+  it("starts or resumes lazily without allowing read-only initialization", async () => {
+    await client?.close();
+    await server?.close();
+    client = undefined;
+    server = undefined;
+
+    const freshRoot = join(directory, "fresh-project");
+    await mkdir(freshRoot, { recursive: true });
+    server = createAgentFlowMcpServer({ projectRoot: freshRoot });
+    client = new Client({ name: "agentflow-lifecycle-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const connectedClient = requireClient(client);
+
+    const statusBeforeStart = await call(connectedClient, "status_get");
+    expect(statusBeforeStart.isError).toBe(true);
+    expect(statusBeforeStart.structuredContent).toMatchObject({ error: "PROJECT_NOT_INITIALIZED" });
+    expect(await readdir(freshRoot)).toEqual([]);
+
+    const started = await call(connectedClient, "run_start_or_resume", {
+      requirement: "Create a fresh lazy project",
+      projectType: "new",
+      hasUi: false,
+      requestedRunId: "lazy-mcp-run",
+      requestKey: "lazy-request-1"
+    });
+    expect(started.isError).not.toBe(true);
+    expect(started.structuredContent).toMatchObject({
+      action: "started",
+      initialized: true,
+      state: { id: "lazy-mcp-run" }
+    });
+
+    const resumed = await call(connectedClient, "run_start_or_resume", {
+      requirement: "Continue the existing lazy project",
+      projectType: "existing",
+      hasUi: false,
+      requestKey: "lazy-request-2"
+    });
+    expect(resumed.structuredContent).toMatchObject({
+      action: "resumed",
+      initialized: false,
+      state: { id: "lazy-mcp-run" }
+    });
+
+    const paths = projectPaths(freshRoot);
+    const statePath = join(paths.runsDirectory, "lazy-mcp-run", "state.json");
+    const completed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+    completed["status"] = "completed";
+    delete completed["activeStageId"];
+    await writeFile(statePath, `${JSON.stringify(completed, null, 2)}\n`, "utf8");
+
+    const next = await call(connectedClient, "run_start_or_resume", {
+      requirement: "Start the next project change",
+      projectType: "existing",
+      hasUi: false,
+      requestedRunId: "next-mcp-run",
+      requestKey: "lazy-request-3"
+    });
+    expect(next.structuredContent).toMatchObject({
+      action: "started",
+      initialized: false,
+      state: { id: "next-mcp-run" }
+    });
   });
 
   it("atomically prepares a deterministic native dispatch and replays it without duplicate spawn intent", async () => {
@@ -1737,6 +1810,11 @@ async function initializeProject(root: string, pipelineId: string, runId: string
   });
   await mkdir(paths.agentflowDirectory, { recursive: true });
   await writeFile(paths.pipelinePath, stringifyYaml(projectPipeline), "utf8");
+  await writeFile(paths.configPath, stringifyYaml({
+    version: 1,
+    pipeline: "pipeline.yaml",
+    runsDirectory: "runs"
+  }), "utf8");
   const engine = new AgentFlowEngine(new JsonRunStore(paths.runsDirectory), projectPipeline);
   await engine.createRun({ id: runId, requirement: `Exercise ${pipelineId}`, hasUi: false });
   await writeFile(paths.currentRunPath, `${JSON.stringify({ runId }, null, 2)}\n`, "utf8");

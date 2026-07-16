@@ -21,6 +21,11 @@ export interface ProjectPaths {
   runsDirectory: string;
   currentRunPath: string;
   pipelinePath: string;
+  configPath: string;
+  ignorePath: string;
+  startLockPath: string;
+  startPendingPath: string;
+  startRequestsDirectory: string;
 }
 
 export interface MutationArguments {
@@ -46,7 +51,12 @@ export function projectPaths(projectRoot = process.cwd()): ProjectPaths {
     agentflowDirectory,
     runsDirectory: resolve(agentflowDirectory, "runs"),
     currentRunPath: resolve(agentflowDirectory, "current-run.json"),
-    pipelinePath: resolve(agentflowDirectory, "pipeline.yaml")
+    pipelinePath: resolve(agentflowDirectory, "pipeline.yaml"),
+    configPath: resolve(agentflowDirectory, "config.yaml"),
+    ignorePath: resolve(agentflowDirectory, ".gitignore"),
+    startLockPath: resolve(agentflowDirectory, ".start.lock"),
+    startPendingPath: resolve(agentflowDirectory, ".start.pending.json"),
+    startRequestsDirectory: resolve(agentflowDirectory, "start-requests")
   };
 }
 
