@@ -1,9 +1,20 @@
 {
   "name": "agentflow",
   "version": "0.4.0",
-  "private": true,
   "description": "Stateful orchestration for staged, multi-thread agent development workflows.",
+  "license": "UNLICENSED",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangnanlin/agentflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zhangnanlin/agentflow/issues"
+  },
+  "homepage": "https://github.com/zhangnanlin/agentflow#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "workspaces": [
     "packages/*"
   ],

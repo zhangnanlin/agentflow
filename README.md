@@ -9,16 +9,20 @@ AgentFlow coordinates a resumable software-delivery pipeline across one Supervis
 Prerequisites: Node.js 20 or newer, Git, and Codex, Cursor, or VS Code.
 
 ```bash
-npx --yes github:zhangnanlin/agentflow setup --host codex
+npx --yes agentflow@0.4.0 setup --host codex
 ```
 
 Use `cursor`, `vscode`, or `all` for another host:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow setup --host all
+npx --yes agentflow@0.4.0 setup --host all
 ```
 
-The command without a Git selector follows the repository's current default branch. For a reproducible installation, use an immutable release tag only after that tag has passed the AgentFlow Release Gate and is published.
+The npm version is immutable. The corresponding immutable Git tag is an alternative for environments that install directly from GitHub:
+
+```bash
+npx --yes github:zhangnanlin/agentflow#v0.4.0 setup --host codex
+```
 
 Global setup installs:
 
@@ -35,7 +39,7 @@ It merges only the `agentflow` and `figma` server entries, preserves unrelated s
 Existing users install the 0.4.0 runtime by rerunning the same user-global command:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow setup --host codex
+npx --yes agentflow@0.4.0 setup --host codex
 ```
 
 Restart Codex if it has not reloaded the MCP bundle. Individual projects do not rerun setup, and this upgrade adds neither an MCP server entry nor an OAuth flow. Figma authentication remains host-managed and on demand only when a UI Stage needs it.
@@ -104,7 +108,7 @@ When a client exposes multiple workspace roots, the caller must pass an explicit
 Validate global setup without writing:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow setup --host codex --dry-run
+npx --yes agentflow@0.4.0 setup --host codex --dry-run
 ```
 
 Override user paths when needed:
@@ -112,9 +116,9 @@ Override user paths when needed:
 ```bash
 AGENTFLOW_HOME=/absolute/runtime/path \
 CODEX_HOME=/absolute/codex/path \
-npx --yes github:zhangnanlin/agentflow setup --host codex
+npx --yes agentflow@0.4.0 setup --host codex
 
-npx --yes github:zhangnanlin/agentflow setup --host vscode \
+npx --yes agentflow@0.4.0 setup --host vscode \
   --vscode-config /absolute/profile/mcp.json
 ```
 
@@ -134,7 +138,7 @@ Doctor reports independent `installation` and `project` sections. `project.statu
 AgentFlow 0.2 project-contained installation remains available explicitly:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow \
+npx --yes agentflow@0.4.0 \
   --project-root /absolute/project/path setup --scope project --host codex
 ```
 

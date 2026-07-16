@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -46,6 +46,22 @@ const expectedToolNames = [
   "worker_observe",
   "worker_prepare",
   "worker_status"
+];
+const packagedSkillNames = [
+  "agentflow-architecture",
+  "agentflow-auto-router",
+  "agentflow-codex-host-bridge",
+  "agentflow-completion-verifier",
+  "agentflow-engineering-plan",
+  "agentflow-figma-concept-explorer",
+  "agentflow-integration-manager",
+  "agentflow-orchestrator",
+  "agentflow-prd-authoring",
+  "agentflow-product-discovery",
+  "agentflow-release-gate",
+  "agentflow-ux-architecture",
+  "agentflow-visual-qa",
+  "agentflow-worktree-isolation"
 ];
 const structuredChoiceSkillNames = [
   "agentflow-auto-router",
@@ -119,6 +135,14 @@ function initializeMcp(entryPoint: string, projectRoot: string): Promise<unknown
   });
 }
 
+async function listFiles(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  return (await Promise.all(entries.map(async (entry) => {
+    const path = join(directory, entry.name);
+    return entry.isDirectory() ? listFiles(path) : [path];
+  }))).flat();
+}
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => (
     rm(directory, { recursive: true, force: true })
@@ -126,13 +150,50 @@ afterEach(async () => {
 });
 
 describe("standalone AgentFlow distribution", () => {
-  it("declares distribution version 0.4.0", async () => {
-    const packageJson = JSON.parse(await readFile(
-      resolve(repositoryRoot, "package.json"),
-      "utf8"
-    )) as { version?: string };
+  it("declares exact public AgentFlow 0.4.0 package metadata", async () => {
+    const [packageJson, lockJson] = await Promise.all([
+      readFile(resolve(repositoryRoot, "package.json"), "utf8").then((content) => (
+        JSON.parse(content) as {
+          private?: boolean;
+          engines?: { node?: string };
+          [key: string]: unknown;
+        }
+      )),
+      readFile(resolve(repositoryRoot, "package-lock.json"), "utf8").then((content) => (
+        JSON.parse(content) as {
+          packages: Record<string, { private?: boolean; [key: string]: unknown }>;
+        }
+      ))
+    ]);
 
-    expect(packageJson.version).toBe("0.4.0");
+    expect(packageJson).toMatchObject({
+      name: "agentflow",
+      version: "0.4.0",
+      license: "UNLICENSED",
+      publishConfig: { access: "public" },
+      repository: {
+        type: "git",
+        url: "git+https://github.com/zhangnanlin/agentflow.git"
+      },
+      bugs: { url: "https://github.com/zhangnanlin/agentflow/issues" },
+      homepage: "https://github.com/zhangnanlin/agentflow#readme",
+      engines: { node: ">=20" }
+    });
+    expect(packageJson.private).toBeUndefined();
+    expect(lockJson.packages[""]).toMatchObject({
+      name: "agentflow",
+      version: "0.4.0",
+      license: "UNLICENSED"
+    });
+
+    for (const workspace of ["cli", "core", "host-adapter", "mcp-server"]) {
+      const workspaceJson = JSON.parse(await readFile(
+        resolve(repositoryRoot, `packages/${workspace}/package.json`),
+        "utf8"
+      )) as { private?: boolean; publishConfig?: unknown };
+      expect(workspaceJson.private).toBe(true);
+      expect(workspaceJson.publishConfig).toBeUndefined();
+    }
   });
 
   it("uses APIs available across the declared Node 20 range", async () => {
@@ -144,7 +205,7 @@ describe("standalone AgentFlow distribution", () => {
     expect(builder).toContain("fileURLToPath(import.meta.url)");
   });
 
-  it("documents unversioned global setup and lazy project routing", async () => {
+  it("documents immutable public setup and lazy project routing", async () => {
     const [
       english,
       chinese,
@@ -166,10 +227,14 @@ describe("standalone AgentFlow distribution", () => {
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-release-gate/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-completion-verifier/SKILL.md"), "utf8")
     ]);
-    const primaryCommand = "npx --yes github:zhangnanlin/agentflow setup --host codex";
+    const primaryCommand = "npx --yes agentflow@0.4.0 setup --host codex";
+    const immutableGitCommand = "npx --yes github:zhangnanlin/agentflow#v0.4.0 setup --host codex";
 
+    for (const documentation of [english, chinese, hostSetup]) {
+      expect(documentation).toContain(primaryCommand);
+      expect(documentation).toContain(immutableGitCommand);
+    }
     for (const readme of [english, chinese]) {
-      expect(readme).toContain(primaryCommand);
       expect(readme).toContain("setup --host all");
       expect(readme).toContain("--scope project");
       expect(readme).toContain("AGENTFLOW_HOME");
@@ -209,7 +274,6 @@ describe("standalone AgentFlow distribution", () => {
     expect(chinese).toContain("各项目不需要重新执行 setup");
     expect(chinese).toContain("不新增 MCP server 条目");
     expect(chinese).toContain("不新增 OAuth 流程");
-    expect(hostSetup).toContain(primaryCommand);
     expect(english).not.toContain("Setup installs a standalone runtime under `.agentflow/runtime/`");
     expect(chinese).not.toContain("Setup 会在 `.agentflow/runtime/` 下安装独立运行时");
 
@@ -303,20 +367,37 @@ describe("standalone AgentFlow distribution", () => {
       files: Array<{ path: string }>;
     }>;
     const files = manifest[0]?.files.map((file) => file.path) ?? [];
-
-    expect(files).toEqual(expect.arrayContaining([
+    const approvedRootFiles = [
       "bundle/agentflow-cli.mjs",
+      "bundle/agentflow-cli.mjs.map",
       "bundle/agentflow-mcp.mjs",
-      ".agents/skills/agentflow-auto-router/SKILL.md",
+      "bundle/agentflow-mcp.mjs.map",
       "skills-lock.json",
       "README.md",
-      "README.zh-CN.md"
-    ]));
-    expect(files).not.toEqual(expect.arrayContaining([
-      ".codex/config.toml",
-      ".cursor/mcp.json",
-      ".vscode/mcp.json"
-    ]));
+      "README.zh-CN.md",
+      "docs/HOST_SETUP.md",
+      "package.json"
+    ];
+    expect(files).toEqual(expect.arrayContaining(approvedRootFiles));
+    const packedSkillNames = [...new Set(files.flatMap((file) => {
+      const match = /^\.agents\/skills\/([^/]+)\//.exec(file);
+      return match?.[1] ? [match[1]] : [];
+    }))].sort();
+    expect(packedSkillNames).toEqual(packagedSkillNames);
+    expect(files.every((file) => (
+      approvedRootFiles.includes(file)
+      || packagedSkillNames.some((skill) => file.startsWith(`.agents/skills/${skill}/`))
+    ))).toBe(true);
+    for (const forbiddenPath of [
+      /^packages\//,
+      /^\.agentflow\//,
+      /^\.codex\//,
+      /^\.cursor\//,
+      /^\.vscode\//,
+      /(?:^|\/)\.npmrc$/
+    ]) {
+      expect(files.some((file) => forbiddenPath.test(file))).toBe(false);
+    }
 
     const packageDirectory = await mkdtemp(join(tmpdir(), "agentflow-package-"));
     const installDirectory = await mkdtemp(join(tmpdir(), "agentflow-install-"));
@@ -347,6 +428,18 @@ describe("standalone AgentFlow distribution", () => {
     const installedPackage = join(installDirectory, "node_modules", "agentflow");
     const installedCli = join(installedPackage, "bundle", "agentflow-cli.mjs");
     const installedMcp = join(installedPackage, "bundle", "agentflow-mcp.mjs");
+    const credentialValuePatterns = [
+      /_authToken\s*=/i,
+      /\bnpm_[A-Za-z0-9]{20,}\b/,
+      /\bghp_[A-Za-z0-9]{20,}\b/,
+      /\bgithub_pat_[A-Za-z0-9_]{20,}\b/
+    ];
+    for (const file of await listFiles(installedPackage)) {
+      const content = await readFile(file, "utf8");
+      for (const pattern of credentialValuePatterns) {
+        expect(`${file}\n${content}`).not.toMatch(pattern);
+      }
+    }
     const installedSetup = await execFileAsync(process.execPath, [
       installedCli,
       "--project-root",
