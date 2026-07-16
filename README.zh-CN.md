@@ -52,6 +52,21 @@ Setup 只合并 `agentflow` 与 `figma` server 条目，保留无关设置，也
 
 `agentflow:on` 只强制当前请求进入流水线，`agentflow:off` 只让当前请求绕过流水线。需求、设计方向、设计冻结、工程计划与发布 Gate 仍必须由用户明确批准。
 
+## Git 快速同步
+
+当用户明确要求 `git push` 已经存在于本地的提交或标签时，AgentFlow 使用确定性的快速路径：校验工作区干净、当前 revision、remote 与 fast-forward 关系，执行普通推送，然后读取远端分支和解引用后的标签 ref。这个路径不会创建 Run、模型 Worker、发布计划或观察计时器。
+
+快速路径绝不允许 `--force`、删除远端 ref、重写历史、创建 GitHub Release、发布 package、执行 migration 或 deployment。只要请求还包含文件修改或需要新建 commit，就仍属于项目变更并启动或恢复 AgentFlow。package 发布和生产部署继续保留明确的 Release Gate；生产部署还保留回滚、健康检查与正数观察窗口。
+
+示例：
+
+```text
+推送当前分支。                              -> Git 快速同步
+在当前 revision 创建 v1.2.3 注解标签并推送。 -> Git 快速同步
+修改 README、提交并推送。                   -> AgentFlow Run
+发布 package 或部署生产环境。               -> AgentFlow 发布流程
+```
+
 ## 多项目并发
 
 同一个全局 MCP 可执行文件可以服务多个项目，不存在全局项目队列。每次工具调用都会解析一个不可变的项目上下文；每个仓库分别拥有自己的 Run 状态与 `.agentflow/.start.lock`。项目 A 和项目 B 可以并发初始化和执行，只有同一项目内互相竞争的首次调用会短暂串行。

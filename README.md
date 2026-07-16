@@ -52,6 +52,21 @@ It does not copy the runtime, Skills, routing instructions, or host configuratio
 
 `agentflow:on` forces routing for one request. `agentflow:off` bypasses it for one request. Human Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates remain explicit.
 
+## Fast Git Sync
+
+An explicit request to `git push` commits or tags that already exist locally uses a deterministic fast path. AgentFlow verifies the clean worktree, local revision, remote, and fast-forward relationship, performs the normal push, then reads the remote branch and dereferenced tag refs. It does not create a Run, model Worker, release plan, or observation timer.
+
+The fast path never permits `--force`, remote ref deletion, history rewriting, GitHub Release creation, package publication, migration, or deployment. A request that still needs file changes or commits remains project-changing and starts or resumes AgentFlow. Package publication and production deployment retain their explicit Release Gates; production also retains rollback, health checks, and a positive observation window.
+
+Examples:
+
+```text
+Push the current branch.                         -> fast Git sync
+Create annotated tag v1.2.3 here and push it.   -> fast Git sync
+Fix the README, commit it, and push.             -> AgentFlow Run
+Publish the package or deploy production.        -> AgentFlow release
+```
+
 ## Multiple Projects
 
 One global MCP executable can serve multiple projects without a global queue. Each tool call resolves an immutable project context, and each repository owns its Run state and `.agentflow/.start.lock`. Project A and project B can initialize and execute concurrently; only competing first-use calls inside the same project serialize briefly.

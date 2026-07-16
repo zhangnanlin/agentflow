@@ -1107,6 +1107,7 @@ function contractMetadata(kind: ArtifactContractKind, payload: unknown): Record<
       qaVerdict: plan.qaVerdict,
       releaseId: plan.release.id,
       releaseVersion: plan.release.version,
+      releaseKind: plan.release.kind ?? "production",
       targetEnvironment: plan.release.targetEnvironment,
       revision: plan.release.revision
     };

@@ -27,6 +27,20 @@ describe("automatic router contract", () => {
     expect(renderVsCodeInstruction("# Team rules\n")).toContain("# Team rules");
   });
 
+  it("keeps dangerous or mixed release requests out of the Git fast path", () => {
+    for (const phrase of [
+      "safe source-control sync",
+      "existing commits or tags",
+      "force push",
+      "ref deletion",
+      "package publication",
+      "deployment",
+      "file changes"
+    ]) {
+      expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
+    }
+  });
+
   it("updates only the managed Cursor block", () => {
     const existing = `${renderCursorRule()}\n# Team suffix\n`;
 

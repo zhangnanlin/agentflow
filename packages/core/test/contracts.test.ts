@@ -199,6 +199,32 @@ describe("M3 delivery artifact contracts", () => {
     })).toThrow();
   });
 
+  it("uses immediate verification for source-control and package releases", () => {
+    const legacy = releasePlan();
+    expect(() => ReleasePlanContractSchema.parse(legacy)).not.toThrow();
+
+    for (const kind of ["source-control", "package-registry"] as const) {
+      const immediate = {
+        ...legacy,
+        release: { ...legacy.release, kind },
+        monitoring: { ...legacy.monitoring, observationWindowMinutes: 0 }
+      };
+      expect(() => ReleasePlanContractSchema.parse(immediate)).not.toThrow();
+      expect(() => ReleasePlanContractSchema.parse({
+        ...immediate,
+        monitoring: { ...immediate.monitoring, observationWindowMinutes: 1 }
+      })).toThrow();
+      expect(artifactPayloadHash("release-plan", immediate))
+        .not.toBe(artifactPayloadHash("release-plan", legacy));
+    }
+
+    expect(() => ReleasePlanContractSchema.parse({
+      ...legacy,
+      release: { ...legacy.release, kind: "production" },
+      monitoring: { ...legacy.monitoring, observationWindowMinutes: 0 }
+    })).toThrow();
+  });
+
   it("requires final release outcome to match health and rollback evidence", () => {
     const value = finalManifest();
     expect(() => FinalManifestContractSchema.parse({

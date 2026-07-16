@@ -96,14 +96,26 @@ describe("standalone AgentFlow distribution", () => {
   });
 
   it("documents unversioned global setup and lazy project routing", async () => {
-    const [english, chinese, hostSetup, projectSpec, routerSkill, routingContract, orchestratorSkill] = await Promise.all([
+    const [
+      english,
+      chinese,
+      hostSetup,
+      projectSpec,
+      routerSkill,
+      routingContract,
+      orchestratorSkill,
+      releaseGateSkill,
+      completionSkill
+    ] = await Promise.all([
       readFile(resolve(repositoryRoot, "README.md"), "utf8"),
       readFile(resolve(repositoryRoot, "README.zh-CN.md"), "utf8"),
       readFile(resolve(repositoryRoot, "docs/HOST_SETUP.md"), "utf8"),
       readFile(resolve(repositoryRoot, "AGENTFLOW_PROJECT_SPEC.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/references/routing-contract.md"), "utf8"),
-      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-orchestrator/SKILL.md"), "utf8")
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-orchestrator/SKILL.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-release-gate/SKILL.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-completion-verifier/SKILL.md"), "utf8")
     ]);
     const primaryCommand = "npx --yes github:zhangnanlin/agentflow setup --host codex";
 
@@ -114,6 +126,8 @@ describe("standalone AgentFlow distribution", () => {
       expect(readme).toContain("AGENTFLOW_HOME");
       expect(readme).toContain("CODEX_HOME");
       expect(readme).toContain("--vscode-config");
+      expect(readme).toContain("git push");
+      expect(readme).toContain("--force");
       expect(readme).not.toContain("github:zhangnanlin/agentflow#v0.2.0 setup");
     }
     expect(english).not.toContain("Setup installs a standalone runtime under `.agentflow/runtime/`");
@@ -125,6 +139,12 @@ describe("standalone AgentFlow distribution", () => {
     expect(routingContract).toContain("run_start_or_resume");
     expect(orchestratorSkill).toContain("per-call project");
     expect(orchestratorSkill).toContain("run_start_or_resume");
+    expect(releaseGateSkill).toContain("source-control");
+    expect(releaseGateSkill).toContain("immediate remote-ref verification");
+    expect(releaseGateSkill).toContain("does not require a model Worker");
+    expect(releaseGateSkill).toContain("positive observation window");
+    expect(completionSkill).toContain("zero-minute observation window");
+    expect(completionSkill).toContain("production");
 
     for (const documentation of [hostSetup, projectSpec]) {
       expect(documentation).toContain("~/.agentflow");

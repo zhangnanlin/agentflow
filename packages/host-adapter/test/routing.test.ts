@@ -23,4 +23,17 @@ describe("global routing contract", () => {
       expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
     }
   });
+
+  it("fast-paths only safe synchronization of existing Git refs", () => {
+    for (const phrase of [
+      "safe source-control sync",
+      "existing commits or tags",
+      "force push",
+      "ref deletion",
+      "package publication",
+      "deployment"
+    ]) {
+      expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
+    }
+  });
 });

@@ -636,7 +636,8 @@ export const ReleasePlanContractSchema = z.object({
     id: ContractIdSchema,
     version: z.string().min(1),
     targetEnvironment: z.string().min(1),
-    revision: GitRevisionSchema
+    revision: GitRevisionSchema,
+    kind: z.enum(["source-control", "package-registry", "production"]).optional()
   }).strict(),
   releaseArtifacts: z.array(TypedArtifactReferenceSchema).min(1),
   preflightChecks: z.array(z.object({
@@ -662,7 +663,7 @@ export const ReleasePlanContractSchema = z.object({
   }).strict(),
   monitoring: z.object({
     owner: ContractIdSchema,
-    observationWindowMinutes: z.number().int().positive(),
+    observationWindowMinutes: z.number().int().nonnegative(),
     signals: z.array(z.object({
       id: ContractIdSchema,
       name: z.string().min(1),
@@ -680,6 +681,7 @@ export const ReleasePlanContractSchema = z.object({
   }).strict()).default([]),
   readiness: z.enum(["ready", "blocked"])
 }).strict().superRefine((value, context) => {
+  const releaseKind = value.release.kind ?? "production";
   const stepIds = new Set(value.rolloutSteps.map((step) => step.id));
   requireUniqueIds(value.releaseArtifacts.map((artifact) => artifact.artifactId), "Release artifact", context);
   requireUniqueIds(value.preflightChecks.map((check) => check.id), "Release preflight check", context);
@@ -715,6 +717,15 @@ export const ReleasePlanContractSchema = z.object({
   }
   if (value.rollback.targetRevision === value.release.revision) {
     context.addIssue({ code: "custom", message: "Rollback target revision must differ from the release revision" });
+  }
+  if (releaseKind === "production" && value.monitoring.observationWindowMinutes === 0) {
+    context.addIssue({ code: "custom", message: "Production releases require a positive observation window" });
+  }
+  if (releaseKind !== "production" && value.monitoring.observationWindowMinutes !== 0) {
+    context.addIssue({
+      code: "custom",
+      message: `${releaseKind} releases require immediate verification with a zero-minute observation window`
+    });
   }
   if (value.readiness === "ready") {
     if (value.qaVerdict !== "passed") {

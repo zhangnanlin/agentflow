@@ -6,6 +6,7 @@ Apply the first matching row to the current user request. Override tokens are sc
 | --- | --- | --- | --- |
 | 1 | `agentflow:on` | Route | Resolve the project, then call `run_start_or_resume`. |
 | 1 | `agentflow:off` | Bypass | Handle normally and do not mutate AgentFlow state. |
+| 2 | Safe source-control sync of existing commits or tags, without file changes | Bypass | Verify the local and remote refs, push without force, then verify the immutable remote refs. |
 | 2 | Any requested project mutation | Route | Call `run_start_or_resume` before edits, then use `agentflow-orchestrator`. |
 | 3 | Pure question | Bypass | Answer without creating a Run. |
 | 3 | Code explanation | Bypass | Explain without changing files. |
@@ -13,7 +14,9 @@ Apply the first matching row to the current user request. Override tokens are sc
 | 3 | Status lookup | Bypass | Report status without starting or advancing a Run. |
 | 3 | Simple non-mutating command | Bypass | Run the command without creating a Run. |
 
-Project mutations include creating or modifying code, tests, documentation, configuration, migrations, designs, build outputs intended for the project, release state, or deployment state.
+Project mutations include creating or modifying code, tests, documentation, configuration, migrations, designs, build outputs intended for the project, package publication, release creation, or deployment state. Force push, ref deletion, and history rewriting always route. A mixed request that asks for file changes and a later push also routes; only synchronization of commits or tags that already exist locally qualifies for the fast path.
+
+The source-control fast path permits a normal branch push, an existing tag push, or creation of one annotated tag at an already verified revision followed by its push. It does not create AgentFlow state, a model Worker, a release plan, or a timed observation. Before the push, require a clean worktree, exact local revision, expected remote, and a fast-forward relationship. Afterwards, read the branch and dereferenced tag refs from the remote.
 
 For a mixed request such as "inspect this failure and fix it", route before the inspection because the requested outcome includes a mutation. For a request such as "inspect this failure and tell me what is wrong", bypass because the requested outcome is read-only.
 

@@ -12,9 +12,10 @@ Classify the user's requested outcome before changing the project. Route qualify
 1. Check the current request for an explicit one-request override.
    - `agentflow:on` forces AgentFlow routing.
    - `agentflow:off` bypasses AgentFlow routing.
-2. Without an override, route every project-changing request. This includes new projects, features, bug fixes, refactors, tests, documentation edits, configuration changes, migrations, design work, and releases.
-3. Bypass AgentFlow only for pure questions, code explanation, read-only inspection, status lookup, and simple commands that do not modify the project.
-4. Classify mixed requests by their requested outcome. If the user asks to inspect and then change anything, route the whole request.
+2. Without an override, route every project-changing request. This includes new projects, features, bug fixes, refactors, tests, documentation edits, configuration changes, migrations, design work, package publication, and deployment.
+3. Bypass AgentFlow for pure questions, code explanation, read-only inspection, status lookup, simple non-mutating commands, and a safe source-control sync that only pushes existing commits or tags without file changes.
+4. Treat force push, ref deletion, history rewriting, release creation, package publication, deployment, migration, and any request with file changes as project-changing even when Git is also mentioned.
+5. Classify mixed requests by their requested outcome. If the user asks to inspect and then change anything, route the whole request.
 
 Read [references/routing-contract.md](references/routing-contract.md) when the request is ambiguous or when adding a new host instruction surface.
 
@@ -30,4 +31,4 @@ Do not edit project files, dispatch implementation Workers, or skip directly to 
 
 ## Bypass
 
-When the decision is bypass, handle the request normally without calling `run_start_or_resume`, creating project state, mutating a Run, or loading the orchestrator. Read-only MCP tools may report `PROJECT_NOT_INITIALIZED`; that is not permission to initialize. Override tokens apply only to the current user request and do not change future routing.
+When the decision is bypass, handle the request normally without calling `run_start_or_resume`, creating project state, mutating a Run, or loading the orchestrator. For a safe source-control sync, verify a clean worktree, the exact local revision, remote URL, and fast-forward relationship before pushing; then read the remote refs and report the immutable result. Do not create a model Worker, release plan, or observation timer. Read-only MCP tools may report `PROJECT_NOT_INITIALIZED`; that is not permission to initialize. Override tokens apply only to the current user request and do not change future routing.

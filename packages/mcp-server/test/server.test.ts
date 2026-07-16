@@ -1318,7 +1318,10 @@ describe("AgentFlow MCP server", () => {
     result = await registerContract(connectedClient, state.revision, "release-plan-1", "release-plan", releasePlan);
     state = runState(result);
     const releasePlanHash = artifactPayloadHash("release-plan", releasePlan);
-    expect(state.artifacts["release-plan-1"]?.sha256).toBe(releasePlanHash);
+    expect(state.artifacts["release-plan-1"]).toMatchObject({
+      sha256: releasePlanHash,
+      metadata: { contract: { releaseKind: "production" } }
+    });
 
     result = await registerArtifact(
       connectedClient,
