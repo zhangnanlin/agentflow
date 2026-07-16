@@ -34,4 +34,16 @@ describe("managed content", () => {
       markers
     )).toThrowError(expect.objectContaining({ code: "MANAGED_BLOCK_INVALID" }));
   });
+
+  it("preserves bytes and whitespace outside the managed block", () => {
+    const prefix = "# Team\r\n\r\n\r\n";
+    const suffix = "\r\n\r\n\r\n# Tail\r\n\r\n";
+    const existing = `${prefix}${markers.start}\r\nold\r\n${markers.end}${suffix}`;
+
+    const updated = mergeManagedBlock(existing, "new", markers);
+
+    expect(updated.startsWith(prefix)).toBe(true);
+    expect(updated.endsWith(suffix)).toBe(true);
+    expect(updated).toContain(`${markers.start}\r\nnew\r\n${markers.end}`);
+  });
 });

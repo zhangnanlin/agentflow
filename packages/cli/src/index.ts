@@ -104,9 +104,27 @@ program.command("setup")
       dryRun: options.dryRun === true,
       skipExternalSkills: options.skipExternalSkills === true
     });
+    const reports = options.dryRun
+      ? []
+      : await Promise.all(setup.hosts.map((host) => runDoctor({
+          paths: paths(),
+          host
+        })));
+    const doctor = {
+      ok: reports.every((report) => report.ok),
+      skipped: options.dryRun === true,
+      reports
+    };
+    const setupWithDoctor = { ...setup, doctor };
+
+    if (!doctor.ok) {
+      printJson(setupWithDoctor);
+      process.exitCode = 1;
+      return;
+    }
 
     if (options.start === undefined) {
-      printJson(setup);
+      printJson(setupWithDoctor);
       return;
     }
 
@@ -132,7 +150,7 @@ program.command("setup")
       await writeCurrentRun(state.id, paths());
     }
     printJson({
-      ...setup,
+      ...setupWithDoctor,
       run: {
         id: state.id,
         requirement: state.requirement,

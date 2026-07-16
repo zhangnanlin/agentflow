@@ -222,7 +222,7 @@ async function inspectHostConfig(
       "host-config",
       "needs_user",
       `Cannot read ${plan.targetPath}: ${error instanceof Error ? error.message : String(error)}`,
-      `Run agentflow configure --host ${spec.client} --write, review the file, then complete OAuth.`
+      `Run agentflow setup --host ${spec.client}, review the merged file, then complete OAuth.`
     ));
     return;
   }

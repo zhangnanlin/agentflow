@@ -22,13 +22,19 @@ export function mergeManagedBlock(
     );
   }
 
-  const block = `${markers.start}\n${body.trim()}\n${markers.end}`;
+  const newline = existing.includes("\r\n") ? "\r\n" : "\n";
+  const normalizedBody = body.trim().replace(/\r?\n/g, newline);
+  const block = `${markers.start}${newline}${normalizedBody}${newline}${markers.end}`;
   if (starts === 0) {
-    return `${existing.trimEnd()}${existing.trim().length === 0 ? "" : "\n\n"}${block}\n`;
+    if (existing.length === 0) return `${block}${newline}`;
+    const separator = existing.endsWith(`${newline}${newline}`)
+      ? ""
+      : existing.endsWith(newline)
+        ? newline
+        : `${newline}${newline}`;
+    return `${existing}${separator}${block}${newline}`;
   }
 
   const blockEnd = end + markers.end.length;
-  return `${existing.slice(0, start)}${block}${existing.slice(blockEnd)}`
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd() + "\n";
+  return `${existing.slice(0, start)}${block}${existing.slice(blockEnd)}`;
 }

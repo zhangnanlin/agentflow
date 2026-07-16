@@ -60,6 +60,12 @@ describe("AgentFlow setup", () => {
       skipExternalSkills: true
     });
     expect(first.created).toContain(join(root, ".agentflow/runtime/bin/agentflow-mcp.mjs"));
+    expect(first.runtime).toEqual({
+      cli: join(root, ".agentflow/runtime/bin/agentflow-cli.mjs"),
+      mcp: join(root, ".agentflow/runtime/bin/agentflow-mcp.mjs")
+    });
+    expect(first.installedSkills).toEqual(["agentflow-auto-router"]);
+    expect(first.pinnedCommits).toEqual({});
     expect(await readFile(join(root, "AGENTS.md"), "utf8")).toContain("agentflow:auto-router:start");
     expect(await readFile(join(root, ".codex/config.toml"), "utf8")).toContain("agentflow-mcp.mjs");
 
@@ -124,6 +130,25 @@ describe("AgentFlow setup", () => {
       assets,
       skipExternalSkills: true
     })).rejects.toMatchObject({ code: "SKILL_COLLISION" });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an unrelated Cursor rule at the AgentFlow-owned path", async () => {
+    const root = await temporaryDirectory("agentflow-cursor-rule-");
+    const assets = await fakeDistributionAssets(root);
+    const rulePath = join(root, ".cursor", "rules", "agentflow.mdc");
+    const unrelated = "---\ndescription: Team rule\nalwaysApply: true\n---\nDo not replace me.\n";
+    await mkdir(join(root, ".cursor", "rules"), { recursive: true });
+    await writeFile(rulePath, unrelated);
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["cursor"],
+      assets,
+      skipExternalSkills: true
+    })).rejects.toMatchObject({ code: "INSTRUCTION_CONFLICT" });
+    expect(await readFile(rulePath, "utf8")).toBe(unrelated);
     await expect(readFile(join(root, "AGENTS.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -202,6 +227,42 @@ describe("AgentFlow setup", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("rejects a linked distribution root before writing", async () => {
+    const root = await temporaryDirectory("agentflow-root-link-");
+    const assets = await fakeDistributionAssets(root);
+    const realDistribution = join(root, "real-distribution");
+    await rename(assets.root, realDistribution);
+    await symlink(
+      realDistribution,
+      assets.root,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets,
+      skipExternalSkills: true
+    })).rejects.toMatchObject({ code: "SETUP_PATH_ESCAPE" });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects unsupported Node versions before writing", async () => {
+    const root = await temporaryDirectory("agentflow-node-version-");
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(root),
+      skipExternalSkills: true
+    }, { nodeVersion: "19.9.0" })).rejects.toMatchObject({
+      code: "SETUP_NODE_UNSUPPORTED"
+    });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("stages only lock-declared Superpowers Skills at the pinned commit", async () => {
     const root = await temporaryDirectory("agentflow-external-");
     const assets = await fakeDistributionAssets(root);
@@ -248,5 +309,45 @@ describe("AgentFlow setup", () => {
     expect(result.created).toContain(
       join(root, ".agents", "skills", "brainstorming", "SKILL.md")
     );
+    expect(result.pinnedCommits).toEqual({
+      "obra-superpowers": superpowersCommit
+    });
+  });
+
+  it("rejects a mismatched external checkout and removes its staging directory", async () => {
+    const root = await temporaryDirectory("agentflow-external-mismatch-");
+    const assets = await fakeDistributionAssets(root);
+    await writeFile(assets.skillsLockPath, JSON.stringify({
+      schemaVersion: 1,
+      dependencies: [{
+        id: "obra-superpowers",
+        repository: "https://example.invalid/obra/superpowers.git",
+        commit: superpowersCommit,
+        skills: [{ name: "brainstorming" }]
+      }]
+    }));
+    let checkout: string | undefined;
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets
+    }, {
+      gitRunner: async (args: string[]) => {
+        if (args[0] === "clone") {
+          checkout = args.at(-1);
+          if (!checkout) throw new Error("missing checkout path");
+          await mkdir(join(checkout, "skills", "brainstorming"), { recursive: true });
+          await writeFile(join(checkout, "skills", "brainstorming", "SKILL.md"), "staged\n");
+        }
+        return args.includes("rev-parse") ? { stdout: `${"0".repeat(40)}\n` } : { stdout: "" };
+      }
+    })).rejects.toMatchObject({ code: "EXTERNAL_SKILL_COMMIT_MISMATCH" });
+
+    expect(checkout).toBeDefined();
+    await expect(readFile(join(checkout ?? "", "skills", "brainstorming", "SKILL.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 });

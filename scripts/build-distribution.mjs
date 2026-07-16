@@ -1,8 +1,9 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-const root = resolve(import.meta.dirname, "..");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bundleDirectory = resolve(root, "bundle");
 await mkdir(bundleDirectory, { recursive: true });
 

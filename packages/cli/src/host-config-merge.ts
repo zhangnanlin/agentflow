@@ -26,11 +26,12 @@ function parseObject(
   desired = false
 ): JsonRecord {
   try {
-    const parsed: unknown = content.trim().length === 0
+    const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
+    const parsed: unknown = normalized.trim().length === 0
       ? {}
       : client === "codex"
-        ? parseToml(content)
-        : JSON.parse(content);
+        ? parseToml(normalized)
+        : JSON.parse(normalized);
     if (isRecord(parsed)) return parsed;
   } catch (error) {
     throw new AgentFlowError(
@@ -132,16 +133,30 @@ function renderCodexMerge(existingText: string, desiredText: string): string {
   const desired = parseObject(client, desiredText, true);
   const existingServers = serverTable(existing, tableName, client);
   const desiredServers = serverTable(desired, tableName, client, true);
-  const { missing } = mergeServers(client, existingServers, desiredServers);
   const currentBody = managedTomlBody(existingText);
+  const managedServers = currentBody === undefined
+    ? {}
+    : serverTable(parseObject(client, currentBody), tableName, client);
+  const unmanagedServers = { ...existingServers };
+  for (const [name, value] of Object.entries(managedServers)) {
+    if (!Object.prototype.hasOwnProperty.call(existingServers, name)
+      || !isDeepStrictEqual(existingServers[name], value)) {
+      throw new AgentFlowError(
+        `Managed Codex server does not match parsed configuration: ${name}`,
+        "MANAGED_BLOCK_INVALID",
+        { server: name }
+      );
+    }
+    delete unmanagedServers[name];
+  }
+  const { missing } = mergeServers(client, unmanagedServers, desiredServers);
 
   if (Object.keys(missing).length === 0) {
     return existingText;
   }
 
   const addedBody = stringifyToml({ [tableName]: missing }).trim();
-  const body = [currentBody, addedBody].filter((value) => value && value.length > 0).join("\n\n");
-  const rendered = mergeManagedBlock(existingText, body, tomlMarkers);
+  const rendered = mergeManagedBlock(existingText, addedBody, tomlMarkers);
   parseObject(client, rendered);
   return rendered;
 }

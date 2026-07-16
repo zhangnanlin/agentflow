@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
+  access,
   lstat,
   mkdir,
   mkdtemp,
@@ -41,6 +43,9 @@ export interface SetupOptions {
 export interface SetupResult {
   projectRoot: string;
   hosts: HostClient[];
+  runtime: { cli: string; mcp: string };
+  installedSkills: string[];
+  pinnedCommits: Record<string, string>;
   planned: string[];
   created: string[];
   updated: string[];
@@ -59,6 +64,7 @@ export interface SetupFileSystem {
 export interface SetupDependencies {
   fileSystem?: Partial<SetupFileSystem>;
   gitRunner?: GitRunner;
+  nodeVersion?: string;
 }
 
 export interface GitRunResult {
@@ -70,6 +76,9 @@ export type GitRunner = (args: string[]) => Promise<GitRunResult>;
 export interface SetupPlan {
   projectRoot: string;
   hosts: HostClient[];
+  runtime: { cli: string; mcp: string };
+  installedSkills: string[];
+  pinnedCommits: Record<string, string>;
   files: PlannedFile[];
   snapshots: Map<string, Uint8Array | undefined>;
   skipped: string[];
@@ -112,6 +121,25 @@ function sameBytes(left: Uint8Array | undefined, right: Uint8Array): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
+function sameOptionalBytes(
+  left: Uint8Array | undefined,
+  right: Uint8Array | undefined
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return sameBytes(left, right);
+}
+
+function assertNodeVersion(version: string): void {
+  const major = Number.parseInt(version, 10);
+  if (!Number.isSafeInteger(major) || major < 20) {
+    throw new AgentFlowError(
+      `AgentFlow setup requires Node.js 20 or newer; received ${version}`,
+      "SETUP_NODE_UNSUPPORTED",
+      { version }
+    );
+  }
+}
+
 function normalizeHosts(values: (HostClient | "all")[]): HostClient[] {
   if (values.length === 0) {
     throw new AgentFlowError("Select at least one host", "SETUP_HOST_REQUIRED");
@@ -126,6 +154,17 @@ function normalizeHosts(values: (HostClient | "all")[]): HostClient[] {
     selected.add(value);
   }
   return hostOrder.filter((host) => selected.has(host));
+}
+
+function isAgentFlowCursorRule(content: string): boolean {
+  return content.replace(/\r\n/g, "\n").startsWith([
+    "---",
+    "description: Route project changes through AgentFlow",
+    "globs:",
+    "alwaysApply: true",
+    "---",
+    ""
+  ].join("\n"));
 }
 
 export function resolveSetupDestination(projectRoot: string, destination: string): string {
@@ -164,6 +203,20 @@ async function assertNoLinkedDestination(
       throw error;
     }
   }
+}
+
+async function assertRealDirectory(path: string, label: string): Promise<void> {
+  try {
+    const stats = await lstat(path);
+    if (!stats.isSymbolicLink() && stats.isDirectory()) return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  throw new AgentFlowError(
+    `${label} must be a real directory: ${path}`,
+    "SETUP_PATH_ESCAPE",
+    { path, label }
+  );
 }
 
 async function readOptional(path: string): Promise<Uint8Array | undefined> {
@@ -339,7 +392,7 @@ interface LockedSuperpowersDependency {
   skills: string[];
 }
 
-function lockedSuperpowers(content: Uint8Array): LockedSuperpowersDependency {
+function lockDependencies(content: Uint8Array): Array<Record<string, unknown>> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(content));
@@ -350,13 +403,33 @@ function lockedSuperpowers(content: Uint8Array): LockedSuperpowersDependency {
       { cause: error instanceof Error ? error.message : String(error) }
     );
   }
-  const dependencies = typeof parsed === "object" && parsed !== null
-    && "dependencies" in parsed && Array.isArray(parsed.dependencies)
-    ? parsed.dependencies
-    : [];
-  const dependency = dependencies.find((value: unknown) => (
-    typeof value === "object" && value !== null && "id" in value
-      && value.id === "obra-superpowers"
+  if (typeof parsed !== "object" || parsed === null
+    || !("dependencies" in parsed) || !Array.isArray(parsed.dependencies)) {
+    throw new AgentFlowError(
+      "skills-lock.json must contain a dependencies array",
+      "EXTERNAL_SKILL_LOCK_INVALID"
+    );
+  }
+  return parsed.dependencies.filter((value): value is Record<string, unknown> => (
+    typeof value === "object" && value !== null && !Array.isArray(value)
+  ));
+}
+
+function pinnedCommits(content: Uint8Array): Record<string, string> {
+  const commits: Record<string, string> = {};
+  for (const dependency of lockDependencies(content)) {
+    if (typeof dependency.id === "string" && typeof dependency.commit === "string") {
+      commits[dependency.id] = dependency.commit;
+    }
+  }
+  return Object.fromEntries(Object.entries(commits).sort(([left], [right]) => (
+    left.localeCompare(right)
+  )));
+}
+
+function lockedSuperpowers(content: Uint8Array): LockedSuperpowersDependency {
+  const dependency = lockDependencies(content).find((value) => (
+    value.id === "obra-superpowers"
   ));
   if (typeof dependency !== "object" || dependency === null) {
     throw new AgentFlowError(
@@ -397,10 +470,20 @@ async function externalSkillFiles(
   gitRunner: GitRunner
 ): Promise<PlannedFile[]> {
   const dependency = lockedSuperpowers(lockContent);
+  try {
+    await gitRunner(["--version"]);
+  } catch (error) {
+    throw new AgentFlowError(
+      "Git is required to install pinned external Skills",
+      "SETUP_GIT_UNAVAILABLE",
+      { cause: error instanceof Error ? error.message : String(error) }
+    );
+  }
   const staging = await mkdtemp(join(tmpdir(), "agentflow-superpowers-"));
   const checkout = resolve(staging, "checkout");
   try {
     await gitRunner(["clone", "--no-checkout", dependency.repository, checkout]);
+    await assertRealDirectory(checkout, "Superpowers checkout");
     await gitRunner(["-C", checkout, "checkout", "--detach", superpowersCommit]);
     const revision = (await gitRunner(["-C", checkout, "rev-parse", "HEAD"])).stdout.trim();
     if (revision !== superpowersCommit) {
@@ -437,6 +520,7 @@ export async function planSetup(
   options: SetupOptions,
   dependencies: SetupDependencies = {}
 ): Promise<SetupPlan> {
+  assertNodeVersion(dependencies.nodeVersion ?? process.versions.node);
   const projectRoot = resolve(options.projectRoot);
   const rootKind = await pathIsDirectory(projectRoot);
   if (!rootKind) {
@@ -446,6 +530,16 @@ export async function planSetup(
       { projectRoot }
     );
   }
+  try {
+    await access(projectRoot, fsConstants.R_OK | fsConstants.W_OK);
+  } catch (error) {
+    throw new AgentFlowError(
+      `Project root is not readable and writable: ${projectRoot}`,
+      "SETUP_PROJECT_ROOT_INACCESSIBLE",
+      { projectRoot, cause: error instanceof Error ? error.message : String(error) }
+    );
+  }
+  await assertRealDirectory(options.assets.root, "Distribution root");
   const hosts = normalizeHosts(options.hosts);
   const files: PlannedFile[] = [];
   const snapshots = new Map<string, Uint8Array | undefined>();
@@ -475,8 +569,20 @@ export async function planSetup(
   });
 
   if (hosts.includes("cursor")) {
+    const cursorRulePath = resolveSetupDestination(
+      projectRoot,
+      ".cursor/rules/agentflow.mdc"
+    );
+    const cursorRule = await existingText(projectRoot, cursorRulePath);
+    if (cursorRule.length > 0 && !isAgentFlowCursorRule(cursorRule)) {
+      throw new AgentFlowError(
+        `Cursor rule path contains unrelated instructions: ${cursorRulePath}`,
+        "INSTRUCTION_CONFLICT",
+        { path: cursorRulePath }
+      );
+    }
     await add({
-      path: resolveSetupDestination(projectRoot, ".cursor/rules/agentflow.mdc"),
+      path: cursorRulePath,
       content: text(renderCursorRule())
     });
   }
@@ -518,6 +624,7 @@ export async function planSetup(
 
   const lockPath = resolveSetupDestination(projectRoot, "skills-lock.json");
   const lockContent = await readDistributionFile(options.assets.root, options.assets.skillsLockPath);
+  const resolvedPinnedCommits = pinnedCommits(lockContent);
   await assertNoLinkedDestination(projectRoot, lockPath);
   const existingLock = await readOptional(lockPath);
   if (existingLock !== undefined && !sameBytes(existingLock, lockContent)) {
@@ -574,9 +681,21 @@ export async function planSetup(
     requiredActions.add(action);
   }
 
+  const skillsRoot = resolveSetupDestination(projectRoot, ".agents/skills");
+  const installedSkills = [...new Set(files.flatMap((file) => {
+    const pathFromSkills = relative(skillsRoot, file.path);
+    if (pathFromSkills === ".." || pathFromSkills.startsWith(`..${sep}`)
+      || isAbsolute(pathFromSkills)) return [];
+    const [skillName] = pathFromSkills.split(sep);
+    return skillName ? [skillName] : [];
+  }))].sort();
+
   return {
     projectRoot,
     hosts,
+    runtime: { cli: runtimeCli, mcp: runtimeMcp },
+    installedSkills,
+    pinnedCommits: resolvedPinnedCommits,
     files,
     snapshots,
     skipped,
@@ -614,24 +733,45 @@ export async function executeSetup(
   const created: string[] = [];
   const updated: string[] = [];
   const unchanged: string[] = [];
-  const applied: Array<{ path: string; previous: Uint8Array | undefined }> = [];
+  const applied: Array<{
+    path: string;
+    previous: Uint8Array | undefined;
+    content: Uint8Array;
+  }> = [];
 
   if (!options.dryRun) {
     try {
       for (const file of plan.files) {
         const previous = plan.snapshots.get(file.path);
+        await assertNoLinkedDestination(plan.projectRoot, file.path);
+        const current = await readOptional(file.path);
+        if (!sameOptionalBytes(current, previous)) {
+          throw new AgentFlowError(
+            `Setup target changed after planning: ${file.path}`,
+            "SETUP_TARGET_CHANGED",
+            { path: file.path }
+          );
+        }
         if (sameBytes(previous, file.content)) {
           unchanged.push(file.path);
           continue;
         }
         await atomicReplace(file.path, file.content, fileSystem);
-        applied.push({ path: file.path, previous });
+        applied.push({ path: file.path, previous, content: file.content });
         (previous === undefined ? created : updated).push(file.path);
       }
     } catch (error) {
       const rollbackErrors: string[] = [];
       for (const file of applied.reverse()) {
         try {
+          await assertNoLinkedDestination(plan.projectRoot, file.path);
+          if (!sameBytes(await readOptional(file.path), file.content)) {
+            throw new AgentFlowError(
+              `Setup target changed before rollback: ${file.path}`,
+              "SETUP_TARGET_CHANGED",
+              { path: file.path }
+            );
+          }
           if (file.previous === undefined) await fileSystem.remove(file.path);
           else await atomicReplace(file.path, file.previous, fileSystem);
         } catch (rollbackError) {
@@ -661,6 +801,9 @@ export async function executeSetup(
   return {
     projectRoot: plan.projectRoot,
     hosts: plan.hosts,
+    runtime: plan.runtime,
+    installedSkills: plan.installedSkills,
+    pinnedCommits: plan.pinnedCommits,
     planned: plan.files.map((file) => file.path),
     created,
     updated,

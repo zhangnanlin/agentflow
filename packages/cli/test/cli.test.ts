@@ -74,6 +74,13 @@ describe("agentflow CLI", () => {
     const projectRoot = await createTemporaryProject();
     const result = parseOutput<{
       hosts: string[];
+      runtime: { cli: string; mcp: string };
+      installedSkills: string[];
+      pinnedCommits: Record<string, string>;
+      doctor: {
+        ok: boolean;
+        reports: Array<{ host?: string; ok: boolean; status: string }>;
+      };
       run?: { requirement: string; activeStageId: string | null };
     }>(await runCli(
       projectRoot,
@@ -86,6 +93,16 @@ describe("agentflow CLI", () => {
     ));
 
     expect(result.hosts).toEqual(["codex"]);
+    expect(result.runtime).toEqual({
+      cli: join(projectRoot, ".agentflow/runtime/bin/agentflow-cli.mjs"),
+      mcp: join(projectRoot, ".agentflow/runtime/bin/agentflow-mcp.mjs")
+    });
+    expect(result.installedSkills).toContain("agentflow-auto-router");
+    expect(result.pinnedCommits).toHaveProperty("obra-superpowers");
+    expect(result.doctor).toMatchObject({
+      ok: true,
+      reports: [{ host: "codex", ok: true, status: "warn" }]
+    });
     expect(result.run).toMatchObject({
       requirement: "Build a notes app",
       activeStageId: "S00"
@@ -149,6 +166,29 @@ describe("agentflow CLI", () => {
     expect(dryStart.exitCode).toBe(1);
     expect(JSON.parse(dryStart.stderr)).toMatchObject({
       error: "SETUP_DRY_RUN_START_CONFLICT"
+    });
+    await expect(readFile(join(projectRoot, ".agentflow", "current-run.json")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not start a Run when setup doctor finds an unusable project", async () => {
+    const projectRoot = await createTemporaryProject();
+    await mkdir(join(projectRoot, ".agentflow"), { recursive: true });
+    await writeFile(join(projectRoot, ".agentflow", "config.yaml"), "[invalid\n");
+
+    const result = await runCli(
+      projectRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills",
+      "--start",
+      "Must not start"
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      doctor: { ok: false }
     });
     await expect(readFile(join(projectRoot, ".agentflow", "current-run.json")))
       .rejects.toMatchObject({ code: "ENOENT" });
