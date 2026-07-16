@@ -11,6 +11,55 @@ const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const cliBundle = resolve(repositoryRoot, "bundle/agentflow-cli.mjs");
 const temporaryDirectories: string[] = [];
+const expectedToolNames = [
+  "artifact_register",
+  "artifact_validate",
+  "gate_decision_request",
+  "gate_resolve",
+  "implementation_plan_materialize",
+  "pipeline_get",
+  "resource_acquire",
+  "resource_heartbeat",
+  "resource_operation_begin",
+  "resource_operation_finish",
+  "resource_rekey",
+  "resource_release",
+  "resource_status",
+  "run_start_or_resume",
+  "stage_complete",
+  "stage_preflight_report",
+  "stage_skip",
+  "status_get",
+  "structured_choice_request",
+  "task_claim",
+  "task_complete",
+  "task_create",
+  "task_heartbeat",
+  "task_retry",
+  "task_setup_abort",
+  "worker_bind",
+  "worker_close",
+  "worker_collect",
+  "worker_dispatch_prepare",
+  "worker_fail",
+  "worker_interrupt",
+  "worker_observe",
+  "worker_prepare",
+  "worker_status"
+];
+const structuredChoiceSkillNames = [
+  "agentflow-auto-router",
+  "agentflow-product-discovery",
+  "agentflow-prd-authoring",
+  "agentflow-figma-concept-explorer",
+  "agentflow-engineering-plan",
+  "agentflow-orchestrator",
+  "agentflow-release-gate"
+];
+const structuredInputSkillNames = [
+  ...structuredChoiceSkillNames,
+  "agentflow-codex-host-bridge"
+];
 
 function stringEnvironment(overrides: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(Object.entries({ ...process.env, ...overrides }).filter(
@@ -77,13 +126,13 @@ afterEach(async () => {
 });
 
 describe("standalone AgentFlow distribution", () => {
-  it("declares distribution version 0.3.0", async () => {
+  it("declares distribution version 0.4.0", async () => {
     const packageJson = JSON.parse(await readFile(
       resolve(repositoryRoot, "package.json"),
       "utf8"
     )) as { version?: string };
 
-    expect(packageJson.version).toBe("0.3.0");
+    expect(packageJson.version).toBe("0.4.0");
   });
 
   it("uses APIs available across the declared Node 20 range", async () => {
@@ -130,6 +179,37 @@ describe("standalone AgentFlow distribution", () => {
       expect(readme).toContain("--force");
       expect(readme).not.toContain("github:zhangnanlin/agentflow#v0.2.0 setup");
     }
+    for (const phrase of [
+      "clickable choices",
+      "three independent questions",
+      "one explicit interaction",
+      "cancellation",
+      "text fallback"
+    ]) {
+      expect(english).toContain(phrase);
+      expect(hostSetup).toContain(phrase);
+    }
+    for (const phrase of [
+      "Individual projects do not rerun setup",
+      "neither an MCP server entry nor an OAuth flow"
+    ]) {
+      expect(english).toContain(phrase);
+    }
+    expect(hostSetup).toContain("Do not rerun setup in individual projects");
+    expect(hostSetup).toContain("no new MCP server or OAuth flow");
+    for (const phrase of [
+      "可点击选项",
+      "最多三个独立问题",
+      "一次明确交互",
+      "取消",
+      "文本回退"
+    ]) {
+      expect(chinese).toContain(phrase);
+    }
+    expect(chinese).toContain("各项目不需要重新执行 setup");
+    expect(chinese).toContain("不新增 MCP server 条目");
+    expect(chinese).toContain("不新增 OAuth 流程");
+    expect(hostSetup).toContain(primaryCommand);
     expect(english).not.toContain("Setup installs a standalone runtime under `.agentflow/runtime/`");
     expect(chinese).not.toContain("Setup 会在 `.agentflow/runtime/` 下安装独立运行时");
 
@@ -286,7 +366,7 @@ describe("standalone AgentFlow distribution", () => {
       id: 1,
       result: {
         capabilities: { tools: expect.any(Object) },
-        serverInfo: { version: "0.3.0" }
+        serverInfo: { version: "0.4.0" }
       }
     });
   }, 60_000);
@@ -351,7 +431,11 @@ describe("standalone AgentFlow distribution", () => {
       "codex",
       "--skip-external-skills"
     ], { cwd: projectA, env: environment });
-    expect(JSON.parse(setup.stdout)).toMatchObject({
+    const setupResult = JSON.parse(setup.stdout) as {
+      installedSkills: string[];
+      [key: string]: unknown;
+    };
+    expect(setupResult).toMatchObject({
       hosts: ["codex"],
       runtime: {
         cli: join(runtimeRoot, "bin", "agentflow-cli.mjs"),
@@ -362,6 +446,19 @@ describe("standalone AgentFlow distribution", () => {
         reports: [{ project: { status: "not-initialized" } }]
       }
     });
+    expect(setupResult.installedSkills).toEqual(expect.arrayContaining(
+      structuredInputSkillNames
+    ));
+    for (const skillName of structuredChoiceSkillNames) {
+      expect(await readFile(
+        join(home, ".agents", "skills", skillName, "SKILL.md"),
+        "utf8"
+      )).toContain("structured_choice_request");
+    }
+    expect(await readFile(
+      join(home, ".agents", "skills", "agentflow-codex-host-bridge", "SKILL.md"),
+      "utf8"
+    )).toContain("host.user-input.structured");
 
     const manifest = JSON.parse(await readFile(join(runtimeRoot, "install.json"), "utf8")) as {
       version: string;
@@ -369,7 +466,7 @@ describe("standalone AgentFlow distribution", () => {
       [key: string]: unknown;
     };
     expect(manifest).toMatchObject({
-      version: "0.3.0",
+      version: "0.4.0",
       runtime: { mcp: join(runtimeRoot, "bin", "agentflow-mcp.mjs") }
     });
     expect(JSON.stringify(manifest)).not.toMatch(/token|secret|authorization/i);
@@ -386,7 +483,29 @@ describe("standalone AgentFlow distribution", () => {
     try {
       expect(client.getServerVersion()).toMatchObject({
         name: "agentflow",
-        version: "0.3.0"
+        version: "0.4.0"
+      });
+      expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
+        expectedToolNames
+      );
+      expect(toolResult(await client.callTool({
+        name: "structured_choice_request",
+        arguments: {
+          message: "Choose a bounded delivery target.",
+          questions: [{
+            id: "target",
+            prompt: "Which target should be used?",
+            options: [
+              { value: "staging", label: "Staging" },
+              { value: "production", label: "Production" }
+            ]
+          }]
+        }
+      }))).toMatchObject({
+        outcome: "unsupported",
+        fallback: {
+          instruction: "Present all questions once and submit only explicit user selections."
+        }
       });
       const startedA = toolResult<{ action: string; state: { id: string } }>(await client.callTool({
         name: "run_start_or_resume",

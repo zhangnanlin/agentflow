@@ -30,6 +30,16 @@ Global setup installs:
 
 It merges only the `agentflow` and `figma` server entries, preserves unrelated settings, and never writes tokens, OAuth credentials, or authorization headers. Restart the selected host after first setup, then complete Figma OAuth once in that host when a UI Stage needs it.
 
+### Upgrade An Existing Installation
+
+Existing users install the 0.4.0 runtime by rerunning the same user-global command:
+
+```bash
+npx --yes github:zhangnanlin/agentflow setup --host codex
+```
+
+Restart Codex if it has not reloaded the MCP bundle. Individual projects do not rerun setup, and this upgrade adds neither an MCP server entry nor an OAuth flow. Figma authentication remains host-managed and on demand only when a UI Stage needs it.
+
 ## First Project Use
 
 Enter an ordinary requirement in any repository. The installed router classifies the request automatically; you do not need to paste an AgentFlow prompt.
@@ -51,6 +61,14 @@ Lazy initialization creates only project state such as:
 It does not copy the runtime, Skills, routing instructions, or host configuration into the project, and it does not edit the root `.gitignore`.
 
 `agentflow:on` forces routing for one request. `agentflow:off` bypasses it for one request. Human Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates remain explicit.
+
+## Structured Choices
+
+AgentFlow presents material bounded decisions as clickable choices instead of asking the user to type an option. It may batch at most three independent questions in one control; dependent questions remain sequential. Recommendations are display-only and never preselect an answer. An already exposed host-native structured control may be used as an equivalent to MCP form elicitation.
+
+For a pending human Gate, AgentFlow derives the question and options from persisted Run state and applies an accepted answer in one explicit interaction bound to the current Artifact hash. Decline, cancellation, timeout, disconnect, a stale revision, or a concurrent conflict leaves the Gate unchanged. If structured input is unsupported, AgentFlow uses one concise text fallback and does not ask again after accepting the answer.
+
+Structured controls contain only non-sensitive single-select fields. AgentFlow does not request secrets, passwords, API keys, access tokens, payment data, or OAuth credentials through them.
 
 ## Fast Git Sync
 

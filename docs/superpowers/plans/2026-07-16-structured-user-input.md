@@ -24,6 +24,19 @@
 
 ---
 
+## Approved Execution Baseline Correction
+
+The original four serial Tasks shared one pre-Core Git baseline. After the Core Task completed, collecting a later Worker against that same baseline necessarily included dependency commits outside the later Task's write scope. AgentFlow correctly recorded that Worker as blocked instead of fabricating a smaller change set.
+
+The user approved revision `7489ae8fa21ab5b93b1a8b41e93bc58f5e87b4069fc9e8acdb176dcc8d123f0c`, which preserves every product, architecture, safety, test, and release constraint above while correcting only execution ownership:
+
+- Completed Core commit `fadf0314d91c6358f1324813b8565945e45884c3` is the dependency-complete baseline.
+- All remaining MCP, guidance, distribution, and documentation work is collected as one bounded `task-structured-input-delivery` change set from that baseline.
+- The historical task sections below remain the detailed TDD procedure; their remaining steps execute serially inside the single delivery Task.
+- No correction authorizes push, tag, package publication, hosted release, or deployment. The final Release Gate remains mandatory.
+
+---
+
 ### Task 1: Core Gate Preflight And Fingerprinted Idempotency
 
 **Files:**
@@ -400,7 +413,7 @@ Expected: all commands exit 0; packed install reports version 0.4.0, both new to
 
 - [ ] **Step 6: Check the complete change set and commit**
 
-Run: `git diff --check a0f04943c99c9c33e7f5df2f26f0b13d40a019f0..HEAD`
+Run: `git diff --check fadf0314d91c6358f1324813b8565945e45884c3..HEAD`
 
 Expected: no output.
 

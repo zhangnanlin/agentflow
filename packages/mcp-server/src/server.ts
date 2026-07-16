@@ -55,7 +55,7 @@ declare const __AGENTFLOW_VERSION__: string | undefined;
 
 const agentFlowVersion = typeof __AGENTFLOW_VERSION__ === "string"
   ? __AGENTFLOW_VERSION__
-  : "0.3.0";
+  : "0.4.0";
 
 const IdentifierSchema = z.string()
   .min(1)

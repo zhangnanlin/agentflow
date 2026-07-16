@@ -30,6 +30,16 @@ npx --yes github:zhangnanlin/agentflow setup --host all
 
 Setup 只合并 `agentflow` 与 `figma` server 条目，保留无关设置，也不会写入 token、OAuth 凭据或 Authorization header。首次安装后重启宿主；只有 UI Stage 需要 Figma 时，才在该宿主中完成一次 OAuth。
 
+### 升级已有安装
+
+已经安装 AgentFlow 的用户只需重新执行同一个全局命令，即可更新到 0.4.0：
+
+```bash
+npx --yes github:zhangnanlin/agentflow setup --host codex
+```
+
+如果 Codex 尚未重新加载 MCP bundle，请重启 Codex。各项目不需要重新执行 setup；这次升级既不新增 MCP server 条目，也不新增 OAuth 流程。Figma 仍由宿主按需管理，只有 UI Stage 需要时才授权。
+
 ## 项目首次使用
 
 在任意仓库中直接输入普通需求即可，不需要粘贴 AgentFlow 专用提示词。
@@ -51,6 +61,14 @@ Setup 只合并 `agentflow` 与 `figma` server 条目，保留无关设置，也
 它不会把 runtime、Skills、路由指令或宿主配置复制进项目，也不会修改项目根目录的 `.gitignore`。
 
 `agentflow:on` 只强制当前请求进入流水线，`agentflow:off` 只让当前请求绕过流水线。需求、设计方向、设计冻结、工程计划与发布 Gate 仍必须由用户明确批准。
+
+## 结构化选择
+
+AgentFlow 会把有边界的关键决策显示为可点击选项，用户不必再手动输入选项。一次可以合并最多三个独立问题；存在依赖关系的问题仍按顺序询问。推荐项只用于展示，不会预选答案。宿主已经暴露的原生结构化控件可以作为 MCP 表单询问的等价入口。
+
+遇到待处理的人工 Gate 时，AgentFlow 从持久化 Run 状态读取问题和选项，并通过一次明确交互提交用户接受的答案，同时绑定当前 Artifact 哈希。拒绝、取消、超时、断开连接、revision 过期或并发冲突都不会修改 Gate。宿主不支持结构化输入时，只进行一次简洁的文本回退；答案被接受后不会重复询问。
+
+结构化控件只包含非敏感的单选字段，不会收集密码、API key、access token、支付数据或 OAuth 凭据。
 
 ## Git 快速同步
 

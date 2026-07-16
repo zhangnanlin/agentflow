@@ -14,6 +14,16 @@ Use `cursor`, `vscode`, or `all` for another host. Run the same command again to
 
 The unversioned GitHub command follows the repository's current default branch. Use an immutable tag only after that exact release has passed the Release Gate and has been published.
 
+### Update An Existing Installation
+
+To load AgentFlow 0.4.0, an existing user reruns the same global setup command:
+
+```bash
+npx --yes github:zhangnanlin/agentflow setup --host codex
+```
+
+Restart Codex if it has not reloaded the installed bundle. Do not rerun setup in individual projects. The update reuses the existing AgentFlow MCP entry and introduces no new MCP server or OAuth flow; Figma OAuth remains a separate host-managed action only when a UI Stage requires it.
+
 ### User Paths
 
 | Surface | Default path |
@@ -66,6 +76,14 @@ AgentFlow configures Figma as `https://mcp.figma.com/mcp` without credentials an
 4. Confirm the live Figma tools before S04.
 
 Static configuration is not proof of restart or OAuth. AgentFlow records those uncertainties as warnings and blocks only a Stage whose declared capabilities are missing.
+
+## Structured User Input
+
+For material bounded decisions, AgentFlow requests clickable choices through MCP form elicitation or an already exposed host-native structured control. It may batch at most three independent questions; dependent questions remain sequential, and recommendations never preselect an answer. The form accepts only non-sensitive single-select values and rejects secrets, credentials, payment data, and OAuth fields.
+
+A pending human Gate is presented from persisted Run state and finalized in one explicit interaction bound to the current Artifact hash. Decline, cancellation, timeout, disconnect, stale revision, and concurrent conflict paths leave the Gate unchanged. When structured controls are unsupported, AgentFlow issues one concise text fallback and does not repeat an accepted answer.
+
+Structured input is provided by the existing AgentFlow MCP server. It is not another server entry, does not require a mode switch, and has no authentication flow of its own.
 
 ## Project Resolution
 

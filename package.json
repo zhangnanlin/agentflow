@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Stateful orchestration for staged, multi-thread agent development workflows.",
   "type": "module",
