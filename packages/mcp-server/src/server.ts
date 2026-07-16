@@ -29,6 +29,7 @@ import {
   type VerificationRecord
 } from "@agentflow/core";
 import {
+  AGENTFLOW_MCP_INSTRUCTIONS,
   DispatchWorkspaceSchema,
   buildWorkerDispatchInput,
   hashWorkerPrompt,
@@ -87,6 +88,8 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   const server = new McpServer({
     name: "agentflow",
     version: "0.1.0"
+  }, {
+    instructions: AGENTFLOW_MCP_INSTRUCTIONS
   });
 
   server.registerTool("pipeline_get", {

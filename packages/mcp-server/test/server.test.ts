@@ -13,6 +13,7 @@ import {
   type PipelineDefinition,
   type RunState
 } from "@agentflow/core";
+import { AGENTFLOW_MCP_INSTRUCTIONS } from "@agentflow/host-adapter";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,6 +85,10 @@ describe("AgentFlow MCP server", () => {
     await client?.close().catch(() => undefined);
     await server?.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("publishes canonical routing instructions", () => {
+    expect(requireClient(client).getInstructions()).toBe(AGENTFLOW_MCP_INSTRUCTIONS);
   });
 
   it("lists the stable tool contract and executes the full stateful workflow", async () => {
