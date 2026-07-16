@@ -55,6 +55,12 @@ const SERVER_TABLES: Record<HostClient, string> = {
   vscode: "servers"
 };
 
+export function hostServerTable(
+  client: HostClient
+): "mcp_servers" | "mcpServers" | "servers" {
+  return SERVER_TABLES[client] as "mcp_servers" | "mcpServers" | "servers";
+}
+
 const SENSITIVE_FIGMA_KEYS = new Set([
   "authorization",
   "bearertokenenvvar",
