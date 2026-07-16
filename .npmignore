@@ -1,0 +1,11 @@
+packages/
+scripts/
+docs/superpowers/
+.agentflow/
+.worktrees/
+.codex/config.toml
+.cursor/mcp.json
+.vscode/mcp.json
+coverage/
+*.log
+*.tsbuildinfo

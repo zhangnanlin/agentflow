@@ -29,7 +29,7 @@ import { executeSetup } from "./setup.js";
 const program = new Command()
   .name("agentflow")
   .description("Coordinate staged multi-thread agent development workflows")
-  .version("0.1.0")
+  .version("0.2.0")
   .option("--project-root <path>", "project root", process.cwd());
 
 function paths() {

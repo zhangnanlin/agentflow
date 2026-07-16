@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access, lstat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +85,8 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 export function resolveAgentFlowMcpEntryPoint(projectRoot: string): string {
+  const colocated = resolve(dirname(fileURLToPath(import.meta.url)), "agentflow-mcp.mjs");
+  if (existsSync(colocated)) return colocated;
   try {
     return resolve(dirname(fileURLToPath(import.meta.resolve("@agentflow/mcp-server"))), "index.js");
   } catch {
