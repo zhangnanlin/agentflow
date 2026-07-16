@@ -80,6 +80,22 @@ describe("AgentFlow setup", () => {
     expect(second.unchanged.length).toBeGreaterThan(0);
   });
 
+  it("preserves a UTF-8 BOM outside the managed instruction block", async () => {
+    const root = await temporaryDirectory("agentflow-instruction-bom-");
+    const agentsPath = join(root, "AGENTS.md");
+    await writeFile(agentsPath, "\uFEFF# Team rules\r\n");
+
+    await executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(root),
+      skipExternalSkills: true
+    });
+
+    expect(await readFile(agentsPath, "utf8"))
+      .toMatch(/^\uFEFF# Team rules\r\n/);
+  });
+
   it("writes nothing during dry-run", async () => {
     const root = await temporaryDirectory("agentflow-dry-");
     const result = await executeSetup({
@@ -151,6 +167,32 @@ describe("AgentFlow setup", () => {
     expect(await readFile(rulePath, "utf8")).toBe(unrelated);
     await expect(readFile(join(root, "AGENTS.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an unmarked Cursor rule that copies AgentFlow frontmatter", async () => {
+    const root = await temporaryDirectory("agentflow-cursor-signature-");
+    const assets = await fakeDistributionAssets(root);
+    const rulePath = join(root, ".cursor", "rules", "agentflow.mdc");
+    const unrelated = [
+      "---",
+      "description: Route project changes through AgentFlow",
+      "globs:",
+      "alwaysApply: true",
+      "---",
+      "",
+      "Keep this team instruction.",
+      ""
+    ].join("\n");
+    await mkdir(join(root, ".cursor", "rules"), { recursive: true });
+    await writeFile(rulePath, unrelated);
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["cursor"],
+      assets,
+      skipExternalSkills: true
+    })).rejects.toMatchObject({ code: "INSTRUCTION_CONFLICT" });
+    expect(await readFile(rulePath, "utf8")).toBe(unrelated);
   });
 
   it("restores earlier writes when a later atomic rename fails", async () => {
@@ -248,6 +290,48 @@ describe("AgentFlow setup", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("revalidates the project root before every write", async () => {
+    const parent = await temporaryDirectory("agentflow-root-swap-");
+    const root = join(parent, "project");
+    const movedRoot = join(parent, "moved-project");
+    const outsideRoot = join(parent, "outside");
+    await Promise.all([
+      mkdir(root, { recursive: true }),
+      mkdir(outsideRoot, { recursive: true })
+    ]);
+    const assets = await fakeDistributionAssets(root);
+    let swapped = false;
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets,
+      skipExternalSkills: true
+    }, {
+      fileSystem: {
+        rename: async (source: string, destination: string) => {
+          await rename(source, destination);
+          if (swapped) return;
+          swapped = true;
+          await rename(root, movedRoot);
+          await symlink(
+            outsideRoot,
+            root,
+            process.platform === "win32" ? "junction" : "dir"
+          );
+        }
+      }
+    })).rejects.toMatchObject({
+      code: expect.stringMatching(/^SETUP_(?:PATH_ESCAPE|ROLLBACK_FAILED)$/)
+    });
+
+    expect(swapped).toBe(true);
+    await expect(readFile(join(
+      outsideRoot,
+      ".agentflow/runtime/bin/agentflow-cli.mjs"
+    ))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects unsupported Node versions before writing", async () => {
     const root = await temporaryDirectory("agentflow-node-version-");
 
@@ -259,6 +343,23 @@ describe("AgentFlow setup", () => {
     }, { nodeVersion: "19.9.0" })).rejects.toMatchObject({
       code: "SETUP_NODE_UNSUPPORTED"
     });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("requires Git even when external Skills are skipped", async () => {
+    const root = await temporaryDirectory("agentflow-git-required-");
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets: await fakeDistributionAssets(root),
+      skipExternalSkills: true
+    }, {
+      gitRunner: async () => {
+        throw new Error("git unavailable");
+      }
+    })).rejects.toMatchObject({ code: "SETUP_GIT_UNAVAILABLE" });
     await expect(readFile(join(root, "AGENTS.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
   });

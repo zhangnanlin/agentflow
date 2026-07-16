@@ -112,6 +112,18 @@ const nativeGitRunner: GitRunner = async (args) => {
   return { stdout: result.stdout };
 };
 
+async function assertGitAvailable(gitRunner: GitRunner): Promise<void> {
+  try {
+    await gitRunner(["--version"]);
+  } catch (error) {
+    throw new AgentFlowError(
+      "Git is required to install and run AgentFlow",
+      "SETUP_GIT_UNAVAILABLE",
+      { cause: error instanceof Error ? error.message : String(error) }
+    );
+  }
+}
+
 function text(value: string): Uint8Array {
   return encoder.encode(value);
 }
@@ -156,17 +168,6 @@ function normalizeHosts(values: (HostClient | "all")[]): HostClient[] {
   return hostOrder.filter((host) => selected.has(host));
 }
 
-function isAgentFlowCursorRule(content: string): boolean {
-  return content.replace(/\r\n/g, "\n").startsWith([
-    "---",
-    "description: Route project changes through AgentFlow",
-    "globs:",
-    "alwaysApply: true",
-    "---",
-    ""
-  ].join("\n"));
-}
-
 export function resolveSetupDestination(projectRoot: string, destination: string): string {
   const root = resolve(projectRoot);
   const target = isAbsolute(destination) ? resolve(destination) : resolve(root, destination);
@@ -185,6 +186,7 @@ async function assertNoLinkedDestination(
   projectRoot: string,
   target: string
 ): Promise<void> {
+  await assertRealDirectory(projectRoot, "Setup path root");
   const pathFromRoot = relative(projectRoot, target);
   let current = projectRoot;
   for (const segment of pathFromRoot.split(sep).filter((value) => value.length > 0)) {
@@ -470,15 +472,6 @@ async function externalSkillFiles(
   gitRunner: GitRunner
 ): Promise<PlannedFile[]> {
   const dependency = lockedSuperpowers(lockContent);
-  try {
-    await gitRunner(["--version"]);
-  } catch (error) {
-    throw new AgentFlowError(
-      "Git is required to install pinned external Skills",
-      "SETUP_GIT_UNAVAILABLE",
-      { cause: error instanceof Error ? error.message : String(error) }
-    );
-  }
   const staging = await mkdtemp(join(tmpdir(), "agentflow-superpowers-"));
   const checkout = resolve(staging, "checkout");
   try {
@@ -512,7 +505,9 @@ async function externalSkillFiles(
 async function existingText(projectRoot: string, path: string): Promise<string> {
   await assertNoLinkedDestination(projectRoot, path);
   const content = await readOptional(path);
-  return content === undefined ? "" : new TextDecoder().decode(content);
+  return content === undefined
+    ? ""
+    : new TextDecoder("utf-8", { ignoreBOM: true }).decode(content);
 }
 
 /** Build and validate the complete target write plan without mutating the project. */
@@ -521,6 +516,8 @@ export async function planSetup(
   dependencies: SetupDependencies = {}
 ): Promise<SetupPlan> {
   assertNodeVersion(dependencies.nodeVersion ?? process.versions.node);
+  const gitRunner = dependencies.gitRunner ?? nativeGitRunner;
+  await assertGitAvailable(gitRunner);
   const projectRoot = resolve(options.projectRoot);
   const rootKind = await pathIsDirectory(projectRoot);
   if (!rootKind) {
@@ -574,16 +571,9 @@ export async function planSetup(
       ".cursor/rules/agentflow.mdc"
     );
     const cursorRule = await existingText(projectRoot, cursorRulePath);
-    if (cursorRule.length > 0 && !isAgentFlowCursorRule(cursorRule)) {
-      throw new AgentFlowError(
-        `Cursor rule path contains unrelated instructions: ${cursorRulePath}`,
-        "INSTRUCTION_CONFLICT",
-        { path: cursorRulePath }
-      );
-    }
     await add({
       path: cursorRulePath,
-      content: text(renderCursorRule())
+      content: text(renderCursorRule(cursorRule))
     });
   }
   if (hosts.includes("vscode")) {
@@ -647,7 +637,7 @@ export async function planSetup(
     for (const skillFile of await externalSkillFiles(
       lockContent,
       projectRoot,
-      dependencies.gitRunner ?? nativeGitRunner
+      gitRunner
     )) {
       await add(skillFile);
     }

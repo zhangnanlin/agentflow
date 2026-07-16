@@ -110,14 +110,12 @@ program.command("setup")
           paths: paths(),
           host
         })));
-    const doctor = {
-      ok: reports.every((report) => report.ok),
-      skipped: options.dryRun === true,
-      reports
-    };
+    const doctor = options.dryRun === true
+      ? { ok: null, skipped: true, reports }
+      : { ok: reports.every((report) => report.ok), skipped: false, reports };
     const setupWithDoctor = { ...setup, doctor };
 
-    if (!doctor.ok) {
+    if (doctor.ok === false) {
       printJson(setupWithDoctor);
       process.exitCode = 1;
       return;

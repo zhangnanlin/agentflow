@@ -171,6 +171,26 @@ describe("agentflow CLI", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("does not report a skipped dry-run doctor as healthy", async () => {
+    const projectRoot = await createTemporaryProject();
+    const result = parseOutput<{
+      doctor: { ok: boolean | null; skipped: boolean; reports: unknown[] };
+    }>(await runCli(
+      projectRoot,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills",
+      "--dry-run"
+    ));
+
+    expect(result.doctor).toEqual({
+      ok: null,
+      skipped: true,
+      reports: []
+    });
+  });
+
   it("does not start a Run when setup doctor finds an unusable project", async () => {
     const projectRoot = await createTemporaryProject();
     await mkdir(join(projectRoot, ".agentflow"), { recursive: true });

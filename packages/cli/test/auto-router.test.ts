@@ -23,6 +23,13 @@ describe("automatic router contract", () => {
   it("renders the native always-on surface for each host", () => {
     expect(renderAgentsInstruction()).toContain("agentflow:auto-router:start");
     expect(renderCursorRule()).toMatch(/alwaysApply:\s*true/);
+    expect(renderCursorRule()).toContain("agentflow:auto-router:start");
     expect(renderVsCodeInstruction("# Team rules\n")).toContain("# Team rules");
+  });
+
+  it("updates only the managed Cursor block", () => {
+    const existing = `${renderCursorRule()}\n# Team suffix\n`;
+
+    expect(renderCursorRule(existing)).toBe(existing);
   });
 });

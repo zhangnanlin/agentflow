@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, lstat, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { stageById, type PipelineDefinition } from "@agentflow/core";
 import { parse as parseYaml } from "yaml";
 import {
@@ -12,6 +14,7 @@ import {
   type HostConfigurationSpec
 } from "./host-config.js";
 import { loadPipeline, type ProjectPaths } from "./runtime.js";
+import type { GitRunner } from "./setup.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "needs_user" | "blocked";
 
@@ -43,7 +46,14 @@ export interface DoctorOptions {
   stageId?: string;
   capabilities?: string[];
   liveProbeProvided?: boolean;
+  gitRunner?: GitRunner;
 }
+
+const execFileAsync = promisify(execFile);
+const nativeGitRunner: GitRunner = async (args) => {
+  const result = await execFileAsync("git", args, { encoding: "utf8" });
+  return { stdout: result.stdout };
+};
 
 const FIGMA_TOOL_NAMES = new Set([
   "whoami",
@@ -81,6 +91,20 @@ async function pathExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function inspectGit(checks: DoctorCheck[], gitRunner: GitRunner): Promise<void> {
+  try {
+    const result = await gitRunner(["--version"]);
+    checks.push(check("git", "ok", result.stdout.trim() || "Git is available"));
+  } catch (error) {
+    checks.push(check(
+      "git",
+      "blocked",
+      `Git is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      "Install Git and ensure it is available on PATH."
+    ));
   }
 }
 
@@ -334,6 +358,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     `Node ${process.versions.node}`,
     nodeMajor >= 20 ? undefined : "Install Node.js 20 or newer."
   ));
+  await inspectGit(checks, options.gitRunner ?? nativeGitRunner);
   await inspectProjectConfiguration(options.paths, checks);
   await inspectAutomaticRouting(options.paths, options.host, checks);
 

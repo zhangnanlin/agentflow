@@ -88,4 +88,29 @@ describe("doctor capability normalization", () => {
       ]));
     }
   });
+
+  it("blocks when Git is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentflow-doctor-git-"));
+    temporaryDirectories.push(root);
+    await executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets: await setupAssets(root),
+      skipExternalSkills: true
+    });
+
+    const report = await runDoctor({
+      paths: projectPaths(root),
+      host: "codex",
+      gitRunner: async () => {
+        throw new Error("git unavailable");
+      }
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.checks).toContainEqual(expect.objectContaining({
+      id: "git",
+      status: "blocked"
+    }));
+  });
 });
