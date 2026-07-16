@@ -1,0 +1,9 @@
+# agentflow:managed:start
+runtime/
+runs/
+current-run.json
+.start.lock
+.start.pending.json
+start-requests/
+*.tmp
+# agentflow:managed:end
