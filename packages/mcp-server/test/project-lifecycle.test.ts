@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -38,6 +38,38 @@ describe("project lifecycle", () => {
     });
     await expect(lstat(paths.agentflowDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it.each(["agentflow-root", "runs-directory"] as const)(
+    "rejects a linked control path before reading or writing outside the project: %s",
+    async (linkedPath) => {
+      const paths = projectPaths(root);
+      const outside = await mkdtemp(join(tmpdir(), "agentflow-lifecycle-outside-"));
+      try {
+        if (linkedPath === "agentflow-root") {
+          await symlink(
+            outside,
+            paths.agentflowDirectory,
+            process.platform === "win32" ? "junction" : "dir"
+          );
+        } else {
+          await mkdir(paths.agentflowDirectory, { recursive: true });
+          await symlink(
+            outside,
+            paths.runsDirectory,
+            process.platform === "win32" ? "junction" : "dir"
+          );
+        }
+
+        await expect(startOrResumeRun(paths, { ...request, requestedRunId: "linked-run" }))
+          .rejects.toMatchObject({ code: "PROJECT_CONTROL_PATH_LINKED" });
+        await expect(assertProjectInitialized(paths))
+          .rejects.toMatchObject({ code: "PROJECT_CONTROL_PATH_LINKED" });
+        expect(await readdir(outside)).toEqual([]);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("creates only lightweight control and state files", async () => {
     const paths = projectPaths(root);
@@ -204,6 +236,32 @@ describe("project lifecycle", () => {
       lockTimeoutMs: 200,
       lockRetryMs: 5
     })).resolves.toMatchObject({ action: "started" });
+  });
+
+  it("keeps concurrent stale-lock reclaimers on one Run", async () => {
+    const paths = projectPaths(root);
+    await mkdir(paths.agentflowDirectory, { recursive: true });
+    await writeFile(paths.startLockPath, "stale", "utf8");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(paths.startLockPath, old, old);
+    const dependencies = { staleLockMs: 10, lockTimeoutMs: 1_000, lockRetryMs: 1 };
+
+    const [left, right] = await Promise.all([
+      startOrResumeRun(paths, {
+        ...request,
+        requestKey: "stale-left",
+        requestedRunId: "stale-left-run"
+      }, dependencies),
+      startOrResumeRun(paths, {
+        ...request,
+        requestKey: "stale-right",
+        requestedRunId: "stale-right-run"
+      }, dependencies)
+    ]);
+
+    expect(left.state.id).toBe(right.state.id);
+    const runDirectories = await readdir(paths.runsDirectory, { withFileTypes: true });
+    expect(runDirectories.filter((entry) => entry.isDirectory())).toHaveLength(1);
   });
 
   it("times out without stealing a live start lock", async () => {

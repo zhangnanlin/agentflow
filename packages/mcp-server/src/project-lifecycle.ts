@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdir,
   open,
   readFile,
+  readdir,
   rename,
   rm,
-  stat,
   writeFile
 } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -103,6 +104,7 @@ export interface ProjectLifecycleDependencies {
 }
 
 export async function assertProjectInitialized(paths: ProjectPaths): Promise<void> {
+  await assertControlTreeUnlinked(paths);
   let configSource: string;
   let pipelineSource: string;
   try {
@@ -131,9 +133,12 @@ export async function startOrResumeRun(
   dependencies: ProjectLifecycleDependencies = {}
 ): Promise<StartOrResumeRunResult> {
   const input = parseStartRequest(rawInput);
+  await assertControlTreeUnlinked(paths);
   await mkdir(paths.agentflowDirectory, { recursive: true });
+  await assertControlTreeUnlinked(paths);
   const lockToken = await acquireStartLock(paths, dependencies);
   try {
+    await assertControlTreeUnlinked(paths);
     return await startOrResumeLocked(paths, input, dependencies);
   } finally {
     await releaseStartLock(paths, lockToken);
@@ -343,7 +348,8 @@ async function acquireStartLock(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
-        const lockStat = await stat(paths.startLockPath);
+        const lockStat = await lstat(paths.startLockPath);
+        if (lockStat.isSymbolicLink()) throw linkedControlPathError(paths, paths.startLockPath);
         if (Date.now() - lockStat.mtimeMs > staleLockMs) {
           await rm(paths.startLockPath, { force: true });
           continue;
@@ -365,6 +371,13 @@ async function acquireStartLock(
 }
 
 async function releaseStartLock(paths: ProjectPaths, token: string): Promise<void> {
+  try {
+    const lockStats = await lstat(paths.startLockPath);
+    if (lockStats.isSymbolicLink()) throw linkedControlPathError(paths, paths.startLockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
   const source = await readOptional(paths.startLockPath);
   if (source === undefined) return;
   try {
@@ -374,6 +387,50 @@ async function releaseStartLock(paths: ProjectPaths, token: string): Promise<voi
   } catch {
     // A changed lock no longer belongs to this invocation and must be preserved.
   }
+}
+
+async function assertControlTreeUnlinked(paths: ProjectPaths): Promise<void> {
+  let rootStats;
+  try {
+    rootStats = await lstat(paths.agentflowDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (rootStats.isSymbolicLink()) {
+    throw linkedControlPathError(paths, paths.agentflowDirectory);
+  }
+  if (!rootStats.isDirectory()) {
+    throw new AgentFlowError(
+      "AgentFlow control path must be a directory",
+      "PROJECT_CONTROL_PATH_INVALID",
+      { projectRoot: paths.projectRoot, path: paths.agentflowDirectory }
+    );
+  }
+  await assertDirectoryTreeUnlinked(paths, paths.agentflowDirectory);
+}
+
+async function assertDirectoryTreeUnlinked(paths: ProjectPaths, directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name);
+    let stats;
+    try {
+      stats = await lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (stats.isSymbolicLink()) throw linkedControlPathError(paths, path);
+    if (stats.isDirectory()) await assertDirectoryTreeUnlinked(paths, path);
+  }
+}
+
+function linkedControlPathError(paths: ProjectPaths, path: string): AgentFlowError {
+  return new AgentFlowError(
+    "AgentFlow control paths must not contain symbolic links",
+    "PROJECT_CONTROL_PATH_LINKED",
+    { projectRoot: paths.projectRoot, path }
+  );
 }
 
 async function loadCurrentRun(paths: ProjectPaths, engine: AgentFlowEngine): Promise<RunState | undefined> {
