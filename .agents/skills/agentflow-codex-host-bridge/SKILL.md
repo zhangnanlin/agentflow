@@ -17,6 +17,8 @@ Inspect the collaboration tools exposed by the current Codex host and record an 
 
 Keep thread lifecycle capabilities separate from Stage capabilities. For a Stage preflight, report canonical IDs such as `host.worker.spawn` and `host.worker.collect` only when the corresponding native operations exist. Report Figma tool IDs only from a Figma-qualified live registry entry; never trust an unqualified `use_figma` suffix or infer availability from `.codex/config.toml`.
 
+Keep `host.user-input.structured` separate from every Worker lifecycle capability. In Codex Default mode, MCP form elicitation and an already exposed native structured-input control require no mode switch. Use them for choices without creating a user-owned task or automating the GUI. If the task resumes, reload persisted Gate state before retrying an interaction; an accepted answer must not be requested again.
+
 For S04, call Figma `whoami` without persisting its email, plan, or seat details. A successful call proves `figma.remote.authenticated` and `figma.tool.whoami`; a configured server that is absent from the current session proves neither. Report `skill.figma-use` only when that Skill is actually loadable in the current host.
 
 ## Dispatch

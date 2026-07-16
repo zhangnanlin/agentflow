@@ -8,7 +8,15 @@ export const AGENTFLOW_ROUTER_BODY = `## AgentFlow automatic routing
 - A force push, ref deletion, history rewriting, package publication, release creation, deployment, migration, and any request with file changes remain project-changing and must route.
 - agentflow:on forces routing for one request; agentflow:off bypasses it for one request.
 - When the client exposes multiple workspace roots, pass the intended absolute projectRoot and never guess.
-- Execute staged work through agentflow-orchestrator and bounded Workers; validate and register every Artifact.`;
+- Execute staged work through agentflow-orchestrator and bounded Workers; validate and register every Artifact.
+
+## Structured user input
+- Inspect repository and Run evidence first; do not ask questions that the available evidence already answers.
+- Use structured_choice_request for material bounded choices across modes, or an already exposed native structured-input control as an equivalent.
+- Batch at most three independent questions; ask dependent questions only after the earlier answers are known.
+- Use gate_decision_request for a pending human Gate so its persisted question, options, revision, actor, and Artifact hash remain authoritative.
+- Use one concise text fallback only after structured input is unavailable.
+- Never repeat accepted answers or infer a decision from recommendation, silence, timeout, cancellation, or unrelated approval.`;
 
 export const AGENTFLOW_MCP_INSTRUCTIONS = `${AGENTFLOW_ROUTER_BODY}
 Treat configured tools and static host files as insufficient evidence of live authentication or capability.`;

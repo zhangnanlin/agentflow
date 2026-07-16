@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AGENTFLOW_MCP_INSTRUCTIONS,
@@ -34,6 +36,57 @@ describe("global routing contract", () => {
       "deployment"
     ]) {
       expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
+    }
+  });
+
+  it("publishes the canonical low-friction structured-input priority", () => {
+    for (const phrase of [
+      "Inspect repository and Run evidence first",
+      "structured_choice_request",
+      "three independent",
+      "gate_decision_request",
+      "one concise text fallback",
+      "Never repeat accepted answers",
+      "recommendation, silence, timeout, cancellation, or unrelated approval"
+    ]) {
+      expect(AGENTFLOW_MCP_INSTRUCTIONS).toContain(phrase);
+    }
+  });
+
+  it("keeps every decision-producing Skill aligned with structured choices and Artifact-bound Gates", async () => {
+    const choiceSkills = [
+      ".agents/skills/agentflow-auto-router/SKILL.md",
+      ".agents/skills/agentflow-auto-router/references/routing-contract.md",
+      ".agents/skills/agentflow-product-discovery/SKILL.md",
+      ".agents/skills/agentflow-prd-authoring/SKILL.md",
+      ".agents/skills/agentflow-figma-concept-explorer/SKILL.md",
+      ".agents/skills/agentflow-engineering-plan/SKILL.md",
+      ".agents/skills/agentflow-orchestrator/SKILL.md"
+    ];
+    for (const path of choiceSkills) {
+      expect(await readFile(resolve(path), "utf8"), path).toContain("structured_choice_request");
+    }
+
+    const gateSkills = [
+      ".agents/skills/agentflow-prd-authoring/SKILL.md",
+      ".agents/skills/agentflow-figma-concept-explorer/SKILL.md",
+      ".agents/skills/agentflow-engineering-plan/SKILL.md",
+      ".agents/skills/agentflow-orchestrator/SKILL.md",
+      ".agents/skills/agentflow-release-gate/SKILL.md"
+    ];
+    for (const path of gateSkills) {
+      const content = await readFile(resolve(path), "utf8");
+      expect(content, path).toContain("gate_decision_request");
+      expect(content, path).toMatch(/Artifact.{0,40}hash/is);
+    }
+
+    const bridge = await readFile(resolve(".agents/skills/agentflow-codex-host-bridge/SKILL.md"), "utf8");
+    const toolMap = await readFile(resolve(".agents/skills/agentflow-codex-host-bridge/references/codex-tool-map.md"), "utf8");
+    for (const content of [bridge, toolMap]) {
+      expect(content).toContain("host.user-input.structured");
+      expect(content).toContain("Default mode");
+      expect(content).toContain("user-owned");
+      expect(content).toContain("GUI");
     }
   });
 });

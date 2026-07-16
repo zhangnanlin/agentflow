@@ -24,6 +24,7 @@ import { ProjectRootResolver } from "../src/project-root.js";
 import { projectPaths } from "../src/runtime.js";
 
 vi.mock("@agentflow/core", async () => import("../../core/src/index.js"));
+vi.mock("@agentflow/host-adapter", async () => import("../../host-adapter/src/index.js"));
 
 const execFileAsync = promisify(execFile);
 
@@ -96,6 +97,15 @@ describe("AgentFlow MCP server", () => {
 
   it("publishes canonical routing instructions", () => {
     expect(requireClient(client).getInstructions()).toBe(AGENTFLOW_MCP_INSTRUCTIONS);
+    for (const phrase of [
+      "structured_choice_request",
+      "gate_decision_request",
+      "three independent",
+      "one concise text fallback",
+      "Never repeat accepted answers"
+    ]) {
+      expect(requireClient(client).getInstructions()).toContain(phrase);
+    }
   });
 
   it("lists the stable tool contract and executes the full stateful workflow", async () => {

@@ -24,6 +24,12 @@ If both override tokens appear and the user's intent is not otherwise explicit, 
 
 Routing is durable model instruction, not transport interception. Higher-priority host or user policy still applies. Once routed, AgentFlow Core and MCP enforce Worker, Artifact, Stage, and human Gate invariants.
 
+## User Input Contract
+
+Inspect repository and Run evidence first. Use `structured_choice_request` for a material bounded choice, or an already exposed native structured-input control as an equivalent. Batch no more than three independent questions and defer dependent questions. If structured input is unavailable, issue one concise text fallback once; do not repeat an accepted answer.
+
+Use `gate_decision_request` for pending human Gates. Its persisted question, options, revision, actor, and Artifact hash are authoritative. Recommendation, silence, timeout, cancellation, and an approval for another Artifact never authorize a Gate.
+
 Each AgentFlow tool call resolves its own immutable project context. A fixed compatibility root wins first; otherwise use an explicit absolute `projectRoot`, one advertised client root, the Git top level, then the MCP working directory. When the host exposes multiple workspace roots, the caller must supply the intended absolute `projectRoot`; ambiguity fails closed and is never converted into a queue.
 
 Only a routed project-changing request calls `run_start_or_resume`. The call is locked and idempotent inside that project, initializes only lightweight `.agentflow` state when needed, and returns the Run that all subsequent calls must use. Bypassed questions and reads do not initialize state. Independent projects do not share a lifecycle lock and may run concurrently.

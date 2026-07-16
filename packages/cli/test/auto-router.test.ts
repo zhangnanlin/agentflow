@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AGENTFLOW_ROUTER_BODY,
   renderAgentsInstruction,
   renderCursorRule,
   renderVsCodeInstruction
 } from "../src/auto-router.js";
+
+vi.mock("@agentflow/host-adapter", async () => import("../../host-adapter/src/index.js"));
 
 describe("automatic router contract", () => {
   it("routes mutations, exempts reads, supports overrides, resumes runs, and preserves gates", () => {
@@ -38,6 +40,21 @@ describe("automatic router contract", () => {
       "file changes"
     ]) {
       expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
+    }
+  });
+
+  it("installs structured choice and human-Gate interaction guidance on every host", () => {
+    for (const phrase of [
+      "structured_choice_request",
+      "three independent",
+      "gate_decision_request",
+      "one concise text fallback",
+      "Never repeat accepted answers"
+    ]) {
+      expect(AGENTFLOW_ROUTER_BODY).toContain(phrase);
+      expect(renderAgentsInstruction()).toContain(phrase);
+      expect(renderCursorRule()).toContain(phrase);
+      expect(renderVsCodeInstruction()).toContain(phrase);
     }
   });
 

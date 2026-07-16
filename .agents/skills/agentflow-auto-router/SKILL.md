@@ -27,6 +27,12 @@ Read [references/routing-contract.md](references/routing-contract.md) when the r
 4. Load `agentflow-orchestrator` and let it coordinate the active Stage, bounded Workers, verified Artifacts, and human Gates.
 5. Preserve every human Gate. Never infer approval from silence or from a previous, unrelated approval.
 
+## Reduce User Input
+
+Inspect repository and Run evidence before asking anything. For a material bounded choice, use `structured_choice_request` or an already exposed native structured-input control. Batch at most three independent questions, but keep dependent questions sequential. Use one concise text fallback only when structured input is unavailable, and never repeat an accepted answer.
+
+Pending human Gates are not normal clarification. Let `agentflow-orchestrator` use `gate_decision_request` so the persisted Gate and current Artifact hash remain authoritative; never treat a recommendation, silence, timeout, cancellation, or unrelated approval as a decision.
+
 Do not edit project files, dispatch implementation Workers, or skip directly to a later Stage before `run_start_or_resume` has established or resumed the Run. Locks are project-local, so independent projects may proceed concurrently.
 
 ## Bypass

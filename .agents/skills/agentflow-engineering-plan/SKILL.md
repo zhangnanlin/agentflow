@@ -23,6 +23,8 @@ Use the pinned `writing-plans` Skill for planning discipline, then adapt its out
 
 Write `implementation-plan.json` following [references/implementation-plan-contract.md](references/implementation-plan-contract.md). Validate and register it before presenting a concise plan summary to the user.
 
-Resolve `engineering-plan-approved` only from an explicit user decision bound to the Artifact hash. Do not create S11 Tasks or edit production code before approval.
+Inspect architecture, repository, and Run evidence before asking. Use `structured_choice_request` for material bounded planning choices, with at most three independent questions and one concise text fallback only when structured input is unavailable. Never repeat an accepted answer.
+
+Request `engineering-plan-approved` with `gate_decision_request` and resolve it only from an explicit user decision bound to the current implementation-plan Artifact hash. Recommendation, silence, timeout, cancellation, and unrelated approval never count. Do not create S11 Tasks or edit production code before approval.
 
 After approval, leave Task creation to the Supervisor. It must complete S10, confirm S11 is active, and call `implementation_plan_materialize` once with the exact registered payload. Do not loop over `task_create`; the atomic materializer is the only supported plan-to-runtime handoff.

@@ -25,7 +25,8 @@ Write `prd.md` and `prd.json` with equivalent information. Follow [references/pr
 2. Write the normalized payload returned by validation and use its returned SHA-256.
 3. Call `artifact_register` with the same payload, hash, S02, and kind `prd`.
 4. Present scope, highest-risk assumptions, and open questions to the user.
-5. Resolve `requirements-approved` only from an explicit user decision.
+5. Use `structured_choice_request` for any remaining material bounded clarification after inspecting the brief and repository evidence. Batch at most three independent questions, keep dependent questions sequential, and use one concise text fallback only when structured input is unavailable. Never repeat an accepted answer.
+6. Request `requirements-approved` with `gate_decision_request` and resolve it only from an explicit user decision bound to the current PRD Artifact hash. Recommendation, silence, timeout, cancellation, or unrelated approval never counts.
 
 ## Stop Boundary
 
