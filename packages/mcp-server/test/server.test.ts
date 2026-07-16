@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
   AgentFlowEngine,
@@ -19,6 +20,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stringify as stringifyYaml } from "yaml";
 import { createAgentFlowMcpServer } from "../src/api.js";
+import { ProjectRootResolver } from "../src/project-root.js";
 import { projectPaths } from "../src/runtime.js";
 
 vi.mock("@agentflow/core", async () => import("../../core/src/index.js"));
@@ -139,9 +141,16 @@ describe("AgentFlow MCP server", () => {
       "reason"
     ]));
     expect(taskCreateSchema.properties).not.toHaveProperty("actorKind");
+    for (const tool of tools.tools.filter((candidate) => candidate.name !== "artifact_validate")) {
+      const schema = tool.inputSchema as { properties?: Record<string, unknown> };
+      expect(
+        schema.properties,
+        `${tool.name} must select a project per call: ${JSON.stringify(tool.inputSchema)}`
+      ).toHaveProperty("projectRoot");
+    }
 
     const pipelineResult = await call(connectedClient, "pipeline_get");
-    expect(pipelineResult.isError).not.toBe(true);
+    expect(pipelineResult.isError, JSON.stringify(pipelineResult)).not.toBe(true);
     expect((pipelineResult.structuredContent as unknown as PipelineDefinition).id).toBe("contract-pipeline");
 
     const initialStatus = await call(connectedClient, "status_get");
@@ -237,6 +246,60 @@ describe("AgentFlow MCP server", () => {
     });
     expect(conflict.isError).toBe(true);
     expect((conflict.structuredContent as { error?: string } | undefined)?.error).toBe("REVISION_CONFLICT");
+  });
+
+  it("isolates two dynamically selected projects while fixed-root mode remains authoritative", async () => {
+    await client?.close();
+    await server?.close();
+    client = undefined;
+    server = undefined;
+
+    const rootA = join(directory, "project-a");
+    const rootB = join(directory, "project-b");
+    await initializeProject(rootA, "pipeline-a", "run-a");
+    await initializeProject(rootB, "pipeline-b", "run-b");
+
+    const resolver = new ProjectRootResolver({
+      cwd: directory,
+      listRoots: async () => [
+        { uri: pathToFileURL(rootA).href },
+        { uri: pathToFileURL(rootB).href }
+      ]
+    });
+    server = createAgentFlowMcpServer({ projectRootResolver: resolver });
+    client = new Client({ name: "agentflow-dynamic-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const connectedClient = requireClient(client);
+    expect((await call(connectedClient, "pipeline_get", { projectRoot: rootA })).structuredContent)
+      .toMatchObject({ id: "pipeline-a" });
+    expect((await call(connectedClient, "pipeline_get", { projectRoot: rootB })).structuredContent)
+      .toMatchObject({ id: "pipeline-b" });
+    expect(runState(await call(connectedClient, "status_get", { projectRoot: rootA })).id).toBe("run-a");
+    expect(runState(await call(connectedClient, "status_get", { projectRoot: rootB })).id).toBe("run-b");
+
+    const changedA = await call(connectedClient, "task_create", {
+      projectRoot: rootA,
+      taskId: "only-a",
+      stageId: "S0",
+      title: "Change project A",
+      ...mutation(0, "change-a", "supervisor-a", "run-a")
+    });
+    expect(runState(changedA).tasks["only-a"]?.status).toBe("ready");
+    expect(runState(await call(connectedClient, "status_get", { projectRoot: rootB })).tasks)
+      .not.toHaveProperty("only-a");
+
+    await client.close();
+    await server.close();
+    server = createAgentFlowMcpServer({ projectRoot: rootA, projectRootResolver: resolver });
+    client = new Client({ name: "agentflow-fixed-test", version: "0.1.0" });
+    const [fixedClientTransport, fixedServerTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(fixedServerTransport);
+    await client.connect(fixedClientTransport);
+    expect((await call(requireClient(client), "pipeline_get", { projectRoot: rootB })).structuredContent)
+      .toMatchObject({ id: "pipeline-a" });
   });
 
   it("atomically prepares a deterministic native dispatch and replays it without duplicate spawn intent", async () => {
@@ -1653,10 +1716,11 @@ async function registerArtifact(
 function mutation(
   expectedRevision: number,
   idempotencyKey: string,
-  actorId: string
+  actorId: string,
+  runId = "run-contract"
 ): Record<string, unknown> {
   return {
-    runId: "run-contract",
+    runId,
     expectedRevision,
     idempotencyKey,
     actorId,
@@ -1664,10 +1728,24 @@ function mutation(
   };
 }
 
+async function initializeProject(root: string, pipelineId: string, runId: string): Promise<void> {
+  const paths = projectPaths(root);
+  const projectPipeline = validatePipeline({
+    ...pipeline,
+    id: pipelineId,
+    name: `Dynamic ${pipelineId}`
+  });
+  await mkdir(paths.agentflowDirectory, { recursive: true });
+  await writeFile(paths.pipelinePath, stringifyYaml(projectPipeline), "utf8");
+  const engine = new AgentFlowEngine(new JsonRunStore(paths.runsDirectory), projectPipeline);
+  await engine.createRun({ id: runId, requirement: `Exercise ${pipelineId}`, hasUi: false });
+  await writeFile(paths.currentRunPath, `${JSON.stringify({ runId }, null, 2)}\n`, "utf8");
+}
+
 async function call(client: Client, name: string, args?: Record<string, unknown>) {
   return client.callTool({
     name,
-    ...(args === undefined ? {} : { arguments: args })
+    arguments: args ?? {}
   });
 }
 

@@ -3,18 +3,24 @@ import { resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createAgentFlowMcpServer } from "./server.js";
 
-function projectRootFrom(argv: string[]): string {
+function fixedProjectRootFrom(argv: string[]): string | undefined {
   const optionIndex = argv.indexOf("--project-root");
   if (optionIndex >= 0) {
     const value = argv[optionIndex + 1];
     if (!value) throw new Error("--project-root requires a path");
     return resolve(value);
   }
-  return resolve(process.env.AGENTFLOW_PROJECT_ROOT ?? process.cwd());
+  const environmentRoot = process.env.AGENTFLOW_PROJECT_ROOT;
+  return environmentRoot === undefined || environmentRoot.length === 0
+    ? undefined
+    : resolve(environmentRoot);
 }
 
 try {
-  const server = createAgentFlowMcpServer({ projectRoot: projectRootFrom(process.argv.slice(2)) });
+  const fixedProjectRoot = fixedProjectRootFrom(process.argv.slice(2));
+  const server = createAgentFlowMcpServer(
+    fixedProjectRoot === undefined ? {} : { projectRoot: fixedProjectRoot }
+  );
   await server.connect(new StdioServerTransport());
 } catch (error) {
   process.stderr.write(`${JSON.stringify({

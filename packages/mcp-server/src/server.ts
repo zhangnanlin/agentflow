@@ -39,6 +39,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
+import { ProjectRootResolver } from "./project-root.js";
 import {
   loadPipeline,
   mutationTarget,
@@ -59,11 +60,17 @@ const VerificationSchema = z.object({
   recordedAt: z.iso.datetime({ offset: true })
 });
 
+const projectSelectorShape = {
+  projectRoot: z.string().min(1).max(4_096).optional()
+};
+
 const runSelectorShape = {
+  ...projectSelectorShape,
   runId: IdentifierSchema.optional()
 };
 
 const mutationShape = {
+  ...projectSelectorShape,
   runId: IdentifierSchema,
   expectedRevision: z.number().int().nonnegative(),
   idempotencyKey: z.string().min(1).max(256),
@@ -81,31 +88,48 @@ const execFileAsync = promisify(execFile);
 
 export interface AgentFlowMcpServerOptions {
   projectRoot?: string;
+  projectRootResolver?: ProjectRootResolver;
 }
 
 export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}): McpServer {
-  const paths = projectPaths(options.projectRoot);
   const server = new McpServer({
     name: "agentflow",
     version: "0.1.0"
   }, {
     instructions: AGENTFLOW_MCP_INSTRUCTIONS
   });
+  const resolver = options.projectRoot === undefined
+    ? options.projectRootResolver ?? new ProjectRootResolver({
+      listRoots: async () => (await server.server.listRoots()).roots
+    })
+    : new ProjectRootResolver({ fixedRoot: options.projectRoot });
+  const pathsFor = async (explicitProjectRoot?: string) => (
+    projectPaths((await resolver.resolve(explicitProjectRoot)).projectRoot)
+  );
+  const targetFor = async (
+    input: Parameters<typeof mutationTarget>[1] & { projectRoot?: string | undefined },
+    defaultActor: Actor
+  ) => {
+    const paths = await pathsFor(input.projectRoot);
+    return { paths, target: await mutationTarget(paths, input, defaultActor) };
+  };
 
   server.registerTool("pipeline_get", {
     title: "Get AgentFlow pipeline",
     description: "Return the pipeline definition configured for this project.",
+    inputSchema: projectSelectorShape,
     annotations: readAnnotations
-  }, async () => handleTool(async () => loadPipeline(paths)));
+  }, async (input) => handleTool(async () => loadPipeline(await pathsFor(input?.projectRoot))));
 
   server.registerTool("status_get", {
     title: "Get AgentFlow run status",
     description: "Return a run state, defaulting to the project's current run.",
-    inputSchema: z.object(runSelectorShape).default({}),
+    inputSchema: runSelectorShape,
     annotations: readAnnotations
-  }, async ({ runId }) => handleTool(async () => {
+  }, async (input) => handleTool(async () => {
+    const paths = await pathsFor(input?.projectRoot);
     const engine = await createEngine(paths);
-    return engine.loadRun(await resolveRunId(runId, paths));
+    return engine.loadRun(await resolveRunId(input?.runId, paths));
   }));
 
   server.registerTool("task_create", {
@@ -134,7 +158,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       risk: z.enum(["low", "medium", "high"]).optional()
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.createTask(target.runId, {
       id: input.taskId,
       stageId: input.stageId,
@@ -168,7 +192,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       payload: z.unknown()
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const plan = validateArtifactPayload("implementation-plan", input.payload) as ImplementationPlanContract;
     validateArtifactReferences("implementation-plan", plan, target.state);
     const targetStageId = resolveStageId(input.targetStageId, target.state.activeStageId, target.runId);
@@ -189,7 +213,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       leaseSeconds: z.number().int().positive().max(86_400).default(900)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.workerId));
+    const { target } = await targetFor(input, actor("worker", input.workerId));
     return target.engine.claimTask(
       target.runId,
       input.taskId,
@@ -209,7 +233,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       leaseSeconds: z.number().int().positive().max(86_400).default(900)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.workerId));
+    const { target } = await targetFor(input, actor("worker", input.workerId));
     return target.engine.heartbeatTask(
       target.runId,
       input.taskId,
@@ -230,7 +254,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       result: z.record(z.string(), z.unknown()).default({})
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.workerId));
+    const { target } = await targetFor(input, actor("worker", input.workerId));
     return target.engine.completeTask(
       target.runId,
       input.taskId,
@@ -249,7 +273,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       taskId: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.retryTask(target.runId, input.taskId, input.reason, target.context);
   }));
 
@@ -262,7 +286,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workerId: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.abortTaskSetup(
       target.runId,
       input.taskId,
@@ -285,7 +309,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       capabilities: ThreadCapabilitiesSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.prepareWorker(target.runId, {
       workerId: input.workerId,
       taskId: input.taskId,
@@ -309,7 +333,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workspace: DispatchWorkspaceSchema.optional()
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { paths, target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const workspace = input.workspace ?? { kind: "project" as const, path: paths.projectRoot };
     const replayingPreparedDispatch = target.state.idempotency[input.idempotencyKey]?.operation === "worker.dispatch.prepare";
     if (!replayingPreparedDispatch) {
@@ -367,7 +391,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       externalThreadId: z.string().min(1).max(512)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.bindWorker(target.runId, input.workerId, input.externalThreadId, target.context);
   }));
 
@@ -379,7 +403,8 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workerId: IdentifierSchema
     },
     annotations: readAnnotations
-  }, async ({ runId, workerId }) => handleTool(async () => {
+  }, async ({ projectRoot, runId, workerId }) => handleTool(async () => {
+    const paths = await pathsFor(projectRoot);
     const engine = await createEngine(paths);
     const state = await engine.loadRun(await resolveRunId(runId, paths));
     const worker = state.workers[workerId];
@@ -396,7 +421,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       status: z.enum(["starting", "running", "unknown"])
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.observeWorker(target.runId, input.workerId, input.status, target.context);
   }));
 
@@ -409,7 +434,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       result: WorkerResultSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     await verifyWorkerChangeSet(target.state, input.workerId, input.result);
     return target.engine.collectWorkerResult(target.runId, input.workerId, input.result, target.context);
   }));
@@ -422,7 +447,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workerId: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.interruptWorker(target.runId, input.workerId, input.reason, target.context);
   }));
 
@@ -434,7 +459,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workerId: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.failWorker(target.runId, input.workerId, input.reason, target.context);
   }));
 
@@ -446,7 +471,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       workerId: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.closeWorker(target.runId, input.workerId, input.reason, target.context);
   }));
 
@@ -465,7 +490,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       metadata: z.record(z.string(), z.unknown()).default({})
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.acquireResource(target.runId, {
       resourceId: input.resourceId,
       kind: input.kind,
@@ -488,7 +513,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       leaseSeconds: z.number().int().positive().max(86_400).default(900)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.heartbeatResource(
       target.runId,
       input.resourceId,
@@ -508,7 +533,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       resourceKey: z.string().min(1).max(1_024)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.rekeyResource(
       target.runId,
       input.resourceId,
@@ -526,7 +551,8 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       resourceId: IdentifierSchema
     },
     annotations: readAnnotations
-  }, async ({ runId, resourceId }) => handleTool(async () => {
+  }, async ({ projectRoot, runId, resourceId }) => handleTool(async () => {
+    const paths = await pathsFor(projectRoot);
     const engine = await createEngine(paths);
     const state = await engine.loadRun(await resolveRunId(runId, paths));
     const resource = state.resources[resourceId];
@@ -545,7 +571,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       tool: z.string().min(1).max(200)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.beginResourceOperation(
       target.runId,
       input.resourceId,
@@ -570,7 +596,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       summary: z.string().max(4_000).default("")
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.finishResourceOperation(target.runId, input.resourceId, input.owner, {
       operationId: input.operationId,
       status: input.status,
@@ -589,7 +615,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       owner: IdentifierSchema
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.owner));
+    const { target } = await targetFor(input, actor("worker", input.owner));
     return target.engine.releaseResource(target.runId, input.resourceId, input.owner, input.reason, target.context);
   }));
 
@@ -608,7 +634,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       metadata: z.record(z.string(), z.unknown()).default({})
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("worker", input.producedBy));
+    const { paths, target } = await targetFor(input, actor("worker", input.producedBy));
     let metadata = input.metadata;
     if (isArtifactContractKind(input.kind)) {
       if (input.payload === undefined) {
@@ -668,7 +694,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       resolution: z.string().min(1)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("user", "mcp-user"));
+    const { target } = await targetFor(input, actor("user", "mcp-user"));
     return target.engine.resolveGate(target.runId, {
       gateId: input.gateId,
       decision: input.decision,
@@ -688,7 +714,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       ttlSeconds: z.number().int().min(30).max(3_600).default(900)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     return target.engine.reportStagePreflight(target.runId, {
       stageId: input.stageId,
       host: input.host,
@@ -705,7 +731,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       stageId: IdentifierSchema.optional()
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const stageId = resolveStageId(input.stageId, target.state.activeStageId, target.runId);
     return target.engine.completeStage(target.runId, stageId, target.context);
   }));
@@ -719,7 +745,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       reason: z.string().min(1)
     }
   }, async (input) => handleTool(async () => {
-    const target = await mutationTarget(paths, input, actor("supervisor", "mcp-supervisor"));
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const stageId = resolveStageId(input.stageId, target.state.activeStageId, target.runId);
     return target.engine.skipStage(target.runId, stageId, input.reason, target.context);
   }));
