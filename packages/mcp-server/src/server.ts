@@ -41,6 +41,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { assertProjectInitialized, startOrResumeRun } from "./project-lifecycle.js";
 import { ProjectRootResolver } from "./project-root.js";
+import { GateDecisionRequestSchema, requestGateDecision } from "./gate-decision.js";
+import { StructuredChoiceRequestSchema, requestStructuredChoice } from "./structured-input.js";
 import {
   loadPipeline,
   mutationTarget,
@@ -144,6 +146,15 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     const engine = await createEngine(paths);
     return engine.loadRun(await resolveRunId(input?.runId, paths));
   }));
+
+  server.registerTool("structured_choice_request", {
+    title: "Request structured choices",
+    description: "Present one to three independent non-sensitive choices through the host's structured input control.",
+    inputSchema: StructuredChoiceRequestSchema,
+    annotations: readAnnotations
+  }, async (input, extra) => handleTool(async () => (
+    requestStructuredChoice(server.server, input, extra.signal)
+  )));
 
   server.registerTool("run_start_or_resume", {
     title: "Start or resume an AgentFlow Run",
@@ -718,6 +729,27 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   }, async ({ kind, payload }) => handleTool(async () => {
     const parsed = validateArtifactPayload(kind, payload);
     return { kind, sha256: artifactPayloadHash(kind, parsed), payload: parsed };
+  }));
+
+  server.registerTool("gate_decision_request", {
+    title: "Request an AgentFlow Gate decision",
+    description: "Present the current persisted human Gate and atomically finalize an explicit accepted selection.",
+    inputSchema: GateDecisionRequestSchema,
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: true,
+      openWorldHint: false
+    }
+  }, async (input, extra) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("user", "mcp-user"));
+    return requestGateDecision(
+      server.server,
+      target.engine,
+      target.state,
+      input,
+      target.context,
+      extra.signal
+    );
   }));
 
   server.registerTool("gate_resolve", {

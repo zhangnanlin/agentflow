@@ -104,6 +104,7 @@ describe("AgentFlow MCP server", () => {
     expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
       "artifact_register",
       "artifact_validate",
+      "gate_decision_request",
       "gate_resolve",
       "implementation_plan_materialize",
       "pipeline_get",
@@ -119,6 +120,7 @@ describe("AgentFlow MCP server", () => {
       "stage_preflight_report",
       "stage_skip",
       "status_get",
+      "structured_choice_request",
       "task_claim",
       "task_complete",
       "task_create",
@@ -147,13 +149,29 @@ describe("AgentFlow MCP server", () => {
       "reason"
     ]));
     expect(taskCreateSchema.properties).not.toHaveProperty("actorKind");
-    for (const tool of tools.tools.filter((candidate) => candidate.name !== "artifact_validate")) {
+    for (const tool of tools.tools.filter((candidate) => ![
+      "artifact_validate",
+      "structured_choice_request"
+    ].includes(candidate.name))) {
       const schema = tool.inputSchema as { properties?: Record<string, unknown> };
       expect(
         schema.properties,
         `${tool.name} must select a project per call: ${JSON.stringify(tool.inputSchema)}`
       ).toHaveProperty("projectRoot");
     }
+    const structuredChoice = tools.tools.find((tool) => tool.name === "structured_choice_request");
+    expect(structuredChoice?.annotations).toMatchObject({
+      readOnlyHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    });
+    expect(structuredChoice?.inputSchema).not.toHaveProperty("properties.projectRoot");
+    const gateDecision = tools.tools.find((tool) => tool.name === "gate_decision_request");
+    expect(gateDecision?.inputSchema).not.toHaveProperty("properties.question");
+    expect(gateDecision?.inputSchema).not.toHaveProperty("properties.options");
+    expect(gateDecision?.inputSchema).not.toHaveProperty("properties.decision");
+    expect(gateDecision?.inputSchema).not.toHaveProperty("properties.choice");
+    expect(gateDecision?.inputSchema).not.toHaveProperty("properties.resolution");
 
     const pipelineResult = await call(connectedClient, "pipeline_get");
     expect(pipelineResult.isError, JSON.stringify(pipelineResult)).not.toBe(true);
