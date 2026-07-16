@@ -12,7 +12,9 @@ export function mergeManagedBlock(
 ): string {
   const starts = existing.split(markers.start).length - 1;
   const ends = existing.split(markers.end).length - 1;
-  if (starts > 1 || ends > 1 || starts !== ends) {
+  const start = existing.indexOf(markers.start);
+  const end = existing.indexOf(markers.end);
+  if (starts > 1 || ends > 1 || starts !== ends || (starts === 1 && end < start)) {
     throw new AgentFlowError(
       "Managed AgentFlow block is malformed",
       "MANAGED_BLOCK_INVALID",
@@ -25,9 +27,8 @@ export function mergeManagedBlock(
     return `${existing.trimEnd()}${existing.trim().length === 0 ? "" : "\n\n"}${block}\n`;
   }
 
-  const start = existing.indexOf(markers.start);
-  const end = existing.indexOf(markers.end, start) + markers.end.length;
-  return `${existing.slice(0, start)}${block}${existing.slice(end)}`
+  const blockEnd = end + markers.end.length;
+  return `${existing.slice(0, start)}${block}${existing.slice(blockEnd)}`
     .replace(/\n{3,}/g, "\n\n")
     .trimEnd() + "\n";
 }

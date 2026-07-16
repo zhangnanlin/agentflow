@@ -111,10 +111,12 @@ function renderJsonMerge(
 }
 
 function managedTomlBody(existing: string): string | undefined {
+  const starts = existing.split(tomlMarkers.start).length - 1;
+  const ends = existing.split(tomlMarkers.end).length - 1;
   const start = existing.indexOf(tomlMarkers.start);
   const end = existing.indexOf(tomlMarkers.end);
-  if (start === -1 && end === -1) return undefined;
-  if (start === -1 || end === -1 || end < start) {
+  if (starts === 0 && ends === 0) return undefined;
+  if (starts !== 1 || ends !== 1 || end < start) {
     throw new AgentFlowError(
       "Managed AgentFlow block is malformed",
       "MANAGED_BLOCK_INVALID"

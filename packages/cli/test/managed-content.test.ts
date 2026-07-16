@@ -28,5 +28,10 @@ describe("managed content", () => {
       "next",
       markers
     )).toThrowError(expect.objectContaining({ code: "MANAGED_BLOCK_INVALID" }));
+    expect(() => mergeManagedBlock(
+      `${markers.end}\nbody\n${markers.start}`,
+      "next",
+      markers
+    )).toThrowError(expect.objectContaining({ code: "MANAGED_BLOCK_INVALID" }));
   });
 });

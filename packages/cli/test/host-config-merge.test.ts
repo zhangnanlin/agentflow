@@ -2,7 +2,11 @@ import { resolve } from "node:path";
 import { AgentFlowError } from "@agentflow/core";
 import { describe, expect, it } from "vitest";
 import { mergeHostConfiguration } from "../src/host-config-merge.js";
-import type { HostClient, HostConfigurationSpec } from "../src/host-config.js";
+import {
+  renderHostConfiguration,
+  type HostClient,
+  type HostConfigurationSpec
+} from "../src/host-config.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const projectRoot = resolve(repositoryRoot, "fixtures/example-project");
@@ -43,5 +47,20 @@ describe("host configuration merge", () => {
       .toThrowError(expect.objectContaining<Partial<AgentFlowError>>({
         code: "HOST_CONFIG_CONFLICT"
       }));
+  });
+
+  it("rejects duplicated Codex managed markers even when server values match", () => {
+    const codexSpec = spec("codex");
+    const existing = [
+      renderHostConfiguration(codexSpec),
+      "# agentflow:mcp:start",
+      "# agentflow:mcp:end",
+      "# agentflow:mcp:start",
+      "# agentflow:mcp:end",
+      ""
+    ].join("\n");
+
+    expect(() => mergeHostConfiguration("codex", existing, codexSpec))
+      .toThrowError(expect.objectContaining({ code: "MANAGED_BLOCK_INVALID" }));
   });
 });
