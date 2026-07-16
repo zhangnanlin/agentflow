@@ -7,3 +7,7 @@ coverage/
 .agentflow/current-run.json
 .worktrees/
 *.log
+.codex/config.toml
+.cursor/mcp.json
+.vscode/mcp.json
+bundle/
