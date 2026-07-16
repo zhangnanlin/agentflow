@@ -21,15 +21,25 @@ import {
   resolveRunId,
   writeCurrentRun
 } from "./runtime.js";
-import { hostConfigurationSpec, runDoctor } from "./doctor.js";
+import {
+  hostConfigurationSpec,
+  processGlobalPathEnvironment,
+  runDoctor
+} from "./doctor.js";
 import { planHostConfiguration, type HostClient } from "./host-config.js";
 import { resolveDistributionAssets } from "./distribution.js";
-import { executeSetup } from "./setup.js";
+import { executeSetup, type SetupScope } from "./setup.js";
+
+declare const __AGENTFLOW_VERSION__: string | undefined;
+
+export const AGENTFLOW_VERSION = typeof __AGENTFLOW_VERSION__ === "string"
+  ? __AGENTFLOW_VERSION__
+  : "0.3.0";
 
 const program = new Command()
   .name("agentflow")
   .description("Coordinate staged multi-thread agent development workflows")
-  .version("0.2.0")
+  .version(AGENTFLOW_VERSION)
   .option("--project-root <path>", "project root", process.cwd());
 
 function paths() {
@@ -68,9 +78,18 @@ function parseSetupHost(value: string): HostClient | "all" {
   return value as HostClient | "all";
 }
 
+function parseSetupScope(value: string): SetupScope {
+  if (value !== "global" && value !== "project") {
+    throw new InvalidArgumentError("scope must be global or project");
+  }
+  return value;
+}
+
 program.command("setup")
   .description("install AgentFlow runtime, Skills, routing, and host configuration")
   .requiredOption("--host <host>", "editor host", parseSetupHost)
+  .option("--scope <scope>", "installation scope", parseSetupScope, "global")
+  .option("--vscode-config <path>", "override the VS Code user mcp.json path")
   .option("--dry-run", "validate and report the setup plan without writing")
   .option("--skip-external-skills", "do not install pinned external Skills")
   .option("--start <requirement>", "start the first Run after setup succeeds")
@@ -78,12 +97,32 @@ program.command("setup")
   .option("--no-ui", "mark the started project as having no UI")
   .action(async (options: {
     host: HostClient | "all";
+    scope: SetupScope;
+    vscodeConfig?: string;
     dryRun?: boolean;
     skipExternalSkills?: boolean;
     start?: string;
     projectType?: "new" | "existing";
     ui: boolean;
   }) => {
+    if (options.scope === "global" && (
+      options.start !== undefined
+      || options.projectType !== undefined
+      || options.ui === false
+    )) {
+      throw new AgentFlowError(
+        "--start, --project-type, and --no-ui require --scope project",
+        "SETUP_PROJECT_OPTION_REQUIRES_PROJECT_SCOPE",
+        {
+          scope: options.scope,
+          options: [
+            ...(options.start === undefined ? [] : ["--start"]),
+            ...(options.projectType === undefined ? [] : ["--project-type"]),
+            ...(options.ui === false ? ["--no-ui"] : [])
+          ]
+        }
+      );
+    }
     if (options.start === undefined && (options.ui === false || options.projectType !== undefined)) {
       throw new AgentFlowError(
         "--no-ui and --project-type require --start",
@@ -99,16 +138,26 @@ program.command("setup")
 
     const setup = await executeSetup({
       projectRoot: paths().projectRoot,
+      scope: options.scope,
       hosts: [options.host],
       assets: await resolveDistributionAssets(),
       dryRun: options.dryRun === true,
-      skipExternalSkills: options.skipExternalSkills === true
+      skipExternalSkills: options.skipExternalSkills === true,
+      ...(options.vscodeConfig === undefined ? {} : { vscodeConfig: options.vscodeConfig })
+    }, {
+      globalPathEnvironment: processGlobalPathEnvironment(),
+      distributionVersion: AGENTFLOW_VERSION
     });
     const reports = options.dryRun
-      ? []
-      : await Promise.all(setup.hosts.map((host) => runDoctor({
+        ? []
+        : await Promise.all(setup.hosts.map((host) => runDoctor({
           paths: paths(),
-          host
+          host,
+          scope: options.scope,
+          globalPathEnvironment: processGlobalPathEnvironment(),
+          ...(options.vscodeConfig === undefined
+            ? {}
+            : { vscodeConfig: options.vscodeConfig })
         })));
     const doctor = options.dryRun === true
       ? { ok: null, skipped: true, reports }
@@ -167,11 +216,15 @@ program.command("init")
 
 program.command("doctor")
   .description("check local AgentFlow prerequisites")
+  .option("--scope <scope>", "installation scope", parseSetupScope, "global")
+  .option("--vscode-config <path>", "override the VS Code user mcp.json path")
   .addOption(new Option("--host <host>", "current editor host").choices(["codex", "cursor", "vscode"]))
   .option("--stage <stage-id>", "check the live capability contract for one stage")
   .option("--capability <ids...>", "canonical capabilities observed in the current host")
   .option("--live-probe", "declare that the current host registry was probed, even when it exposed no capabilities")
   .action(async (options: {
+    scope: SetupScope;
+    vscodeConfig?: string;
     host?: HostClient;
     stage?: string;
     capability?: string[];
@@ -179,6 +232,11 @@ program.command("doctor")
   }) => {
     const report = await runDoctor({
       paths: paths(),
+      scope: options.scope,
+      globalPathEnvironment: processGlobalPathEnvironment(),
+      ...(options.vscodeConfig === undefined
+        ? {}
+        : { vscodeConfig: options.vscodeConfig }),
       ...(options.host === undefined ? {} : { host: options.host }),
       ...(options.stage === undefined ? {} : { stageId: options.stage }),
       ...(options.capability === undefined ? {} : { capabilities: options.capability }),

@@ -20,12 +20,16 @@ const typescriptDirectory = dirname(require.resolve("typescript/package.json"));
 const tscEntryPoint = join(typescriptDirectory, "bin", "tsc");
 const temporaryDirectories: string[] = [];
 
-function execute(file: string, args: string[]): Promise<CliResult> {
+function execute(
+  file: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv = {}
+): Promise<CliResult> {
   return new Promise((resolve) => {
     execFile(process.execPath, [file, ...args], {
       cwd: repositoryRoot,
       encoding: "utf8",
-      env: { ...process.env, NO_COLOR: "1" }
+      env: { ...process.env, NO_COLOR: "1", ...environment }
     }, (error, stdout, stderr) => {
       resolve({
         exitCode: error && typeof error.code === "number" ? error.code : error ? 1 : 0,
@@ -38,6 +42,14 @@ function execute(file: string, args: string[]): Promise<CliResult> {
 
 async function runCli(projectRoot: string, ...args: string[]): Promise<CliResult> {
   return execute(cliEntryPoint, ["--project-root", projectRoot, ...args]);
+}
+
+async function runCliWithEnvironment(
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv,
+  ...args: string[]
+): Promise<CliResult> {
+  return execute(cliEntryPoint, ["--project-root", projectRoot, ...args], environment);
 }
 
 async function createTemporaryProject(): Promise<string> {
@@ -70,6 +82,127 @@ afterEach(async () => {
 });
 
 describe("agentflow CLI", () => {
+  it("reports the 0.3.0 distribution version", async () => {
+    const result = await execute(cliEntryPoint, ["--version"]);
+
+    expect(result).toEqual({
+      exitCode: 0,
+      stdout: "0.3.0\n",
+      stderr: ""
+    });
+  });
+
+  it("runs global setup by default without changing the project", async () => {
+    const projectRoot = await createTemporaryProject();
+    const home = await createTemporaryProject();
+    const environment = {
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: join(home, "AppData", "Roaming"),
+      AGENTFLOW_HOME: join(home, ".agentflow"),
+      CODEX_HOME: join(home, ".codex")
+    };
+
+    const result = parseOutput<{
+      projectRoot: string;
+      runtime: { cli: string; mcp: string };
+      doctor: { ok: boolean; reports: Array<{ installation: { status: string } }> };
+    }>(await runCliWithEnvironment(
+      projectRoot,
+      environment,
+      "setup",
+      "--host",
+      "codex",
+      "--skip-external-skills"
+    ));
+
+    expect(result.projectRoot).toBe(projectRoot);
+    expect(result.runtime).toEqual({
+      cli: join(home, ".agentflow", "bin", "agentflow-cli.mjs"),
+      mcp: join(home, ".agentflow", "bin", "agentflow-mcp.mjs")
+    });
+    expect(result.doctor).toMatchObject({
+      ok: true,
+      reports: [{ installation: { status: "warn" } }]
+    });
+    expect(await readdir(projectRoot)).toEqual([]);
+    expect(await readFile(join(home, ".codex", "config.toml"), "utf8"))
+      .not.toContain("--project-root");
+  });
+
+  it("accepts an explicit VS Code user configuration path", async () => {
+    const projectRoot = await createTemporaryProject();
+    const home = await createTemporaryProject();
+    const vscodeConfig = join(home, "vscode-user", "mcp.json");
+    const result = parseOutput<{ hosts: string[] }>(await runCliWithEnvironment(
+      projectRoot,
+      {
+        HOME: home,
+        USERPROFILE: home,
+        APPDATA: join(home, "AppData", "Roaming"),
+        AGENTFLOW_HOME: join(home, ".agentflow"),
+        CODEX_HOME: join(home, ".codex")
+      },
+      "setup",
+      "--host",
+      "vscode",
+      "--vscode-config",
+      vscodeConfig,
+      "--skip-external-skills"
+    ));
+
+    expect(result.hosts).toEqual(["vscode"]);
+    expect(JSON.parse(await readFile(vscodeConfig, "utf8"))).toHaveProperty(
+      "servers.agentflow.args"
+    );
+    expect(await readdir(projectRoot)).toEqual([]);
+
+    const relativeOverride = await runCliWithEnvironment(
+      projectRoot,
+      {
+        HOME: home,
+        USERPROFILE: home,
+        APPDATA: join(home, "AppData", "Roaming"),
+        AGENTFLOW_HOME: join(home, ".agentflow"),
+        CODEX_HOME: join(home, ".codex")
+      },
+      "setup",
+      "--host",
+      "vscode",
+      "--vscode-config",
+      "relative/mcp.json",
+      "--skip-external-skills",
+      "--dry-run"
+    );
+    expect(relativeOverride.exitCode).toBe(1);
+    expect(JSON.parse(relativeOverride.stderr)).toMatchObject({
+      error: "GLOBAL_PATH_INVALID"
+    });
+  });
+
+  it("rejects project-only setup options in global scope", async () => {
+    const projectRoot = await createTemporaryProject();
+    for (const args of [
+      ["--start", "Do not start"],
+      ["--project-type", "existing"],
+      ["--no-ui"]
+    ]) {
+      const result = await runCli(
+        projectRoot,
+        "setup",
+        "--host",
+        "codex",
+        "--skip-external-skills",
+        ...args
+      );
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stderr)).toMatchObject({
+        error: "SETUP_PROJECT_OPTION_REQUIRES_PROJECT_SCOPE"
+      });
+    }
+    expect(await readdir(projectRoot)).toEqual([]);
+  });
+
   it("runs setup for one host and optionally starts the first Run", async () => {
     const projectRoot = await createTemporaryProject();
     const result = parseOutput<{
@@ -85,6 +218,8 @@ describe("agentflow CLI", () => {
     }>(await runCli(
       projectRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills",
@@ -118,6 +253,8 @@ describe("agentflow CLI", () => {
     }>(await runCli(
       projectRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills",
@@ -142,6 +279,8 @@ describe("agentflow CLI", () => {
       const result = await runCli(
         projectRoot,
         "setup",
+        "--scope",
+        "project",
         "--host",
         "codex",
         "--skip-external-skills",
@@ -156,6 +295,8 @@ describe("agentflow CLI", () => {
     const dryStart = await runCli(
       projectRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills",
@@ -178,6 +319,8 @@ describe("agentflow CLI", () => {
     }>(await runCli(
       projectRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills",
@@ -199,6 +342,8 @@ describe("agentflow CLI", () => {
     const result = await runCli(
       projectRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills",
@@ -384,12 +529,23 @@ describe("agentflow CLI", () => {
     parseOutput(await runCli(
       setupRoot,
       "setup",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--skip-external-skills"
     ));
 
-    const blocked = await runCli(setupRoot, "doctor", "--host", "codex", "--stage", "S04");
+    const blocked = await runCli(
+      setupRoot,
+      "doctor",
+      "--scope",
+      "project",
+      "--host",
+      "codex",
+      "--stage",
+      "S04"
+    );
     expect(blocked.exitCode).toBe(1);
     expect(JSON.parse(blocked.stdout)).toMatchObject({
       ok: false,
@@ -416,6 +572,8 @@ describe("agentflow CLI", () => {
     }>(await runCli(
       setupRoot,
       "doctor",
+      "--scope",
+      "project",
       "--host",
       "codex",
       "--stage",

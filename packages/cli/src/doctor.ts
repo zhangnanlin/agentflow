@@ -1,11 +1,21 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { access, lstat, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { stageById, type PipelineDefinition } from "@agentflow/core";
+import {
+  stageById,
+  validatePipeline,
+  type PipelineDefinition
+} from "@agentflow/core";
 import { parse as parseYaml } from "yaml";
+import {
+  globalInstallationPaths,
+  type GlobalInstallationPaths,
+  type GlobalPathEnvironment
+} from "./global-paths.js";
 import {
   inspectHostConfiguration,
   planHostConfiguration,
@@ -13,10 +23,12 @@ import {
   type HostConfigurationPlan,
   type HostConfigurationSpec
 } from "./host-config.js";
-import { loadPipeline, type ProjectPaths } from "./runtime.js";
-import type { GitRunner } from "./setup.js";
+import { createEngine, type ProjectPaths } from "./runtime.js";
+import type { GitRunner, SetupScope } from "./setup.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "needs_user" | "blocked";
+export type DoctorOverallStatus = "ok" | "warn" | "blocked";
+export type ProjectDoctorStatus = "initialized" | "not-initialized" | "invalid";
 
 export interface DoctorCheck {
   id: string;
@@ -25,11 +37,24 @@ export interface DoctorCheck {
   remediation?: string;
 }
 
+export interface DoctorSection {
+  status: DoctorOverallStatus;
+  checks: DoctorCheck[];
+}
+
+export interface ProjectDoctorSection {
+  status: ProjectDoctorStatus;
+  checks: DoctorCheck[];
+}
+
 export interface DoctorReport {
   ok: boolean;
-  status: DoctorCheckStatus;
+  status: DoctorOverallStatus;
+  scope: SetupScope;
   host?: HostClient;
   stageId?: string;
+  installation: DoctorSection;
+  project: ProjectDoctorSection;
   checks: DoctorCheck[];
   capabilities: {
     liveProbeProvided: boolean;
@@ -42,11 +67,20 @@ export interface DoctorReport {
 
 export interface DoctorOptions {
   paths: ProjectPaths;
+  scope?: SetupScope;
   host?: HostClient;
   stageId?: string;
   capabilities?: string[];
   liveProbeProvided?: boolean;
   gitRunner?: GitRunner;
+  globalPathEnvironment?: GlobalPathEnvironment;
+  vscodeConfig?: string;
+}
+
+interface ProjectInspection {
+  status: ProjectDoctorStatus;
+  checks: DoctorCheck[];
+  pipeline?: PipelineDefinition;
 }
 
 const execFileAsync = promisify(execFile);
@@ -78,11 +112,16 @@ function check(
   return { id, status, detail, ...(remediation === undefined ? {} : { remediation }) };
 }
 
-function reportStatus(checks: DoctorCheck[]): DoctorCheckStatus {
+function reportStatus(checks: DoctorCheck[]): DoctorOverallStatus {
   if (checks.some((item) => item.status === "blocked")) return "blocked";
-  if (checks.some((item) => item.status === "needs_user")) return "needs_user";
-  if (checks.some((item) => item.status === "warn")) return "warn";
+  if (checks.some((item) => item.status === "warn" || item.status === "needs_user")) {
+    return "warn";
+  }
   return "ok";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -106,6 +145,21 @@ async function inspectGit(checks: DoctorCheck[], gitRunner: GitRunner): Promise<
       "Install Git and ensure it is available on PATH."
     ));
   }
+}
+
+export function processGlobalPathEnvironment(): GlobalPathEnvironment {
+  return {
+    platform: process.platform,
+    home: homedir(),
+    ...(process.env.APPDATA === undefined ? {} : { appData: process.env.APPDATA }),
+    ...(process.env.XDG_CONFIG_HOME === undefined
+      ? {}
+      : { xdgConfigHome: process.env.XDG_CONFIG_HOME }),
+    ...(process.env.AGENTFLOW_HOME === undefined
+      ? {}
+      : { agentflowHome: process.env.AGENTFLOW_HOME }),
+    ...(process.env.CODEX_HOME === undefined ? {} : { codexHome: process.env.CODEX_HOME })
+  };
 }
 
 export function resolveAgentFlowMcpEntryPoint(projectRoot: string): string {
@@ -172,41 +226,110 @@ export function normalizeHostCapabilities(values: string[]): { available: string
   return { available: [...available].sort(), ignored: [...ignored].sort() };
 }
 
-async function inspectProjectConfiguration(paths: ProjectPaths, checks: DoctorCheck[]): Promise<void> {
-  const projectExists = await pathExists(paths.projectRoot);
-  checks.push(check(
-    "project",
-    projectExists ? "ok" : "blocked",
-    projectExists ? paths.projectRoot : `${paths.projectRoot} is missing`
-  ));
-  const agentflowExists = await pathExists(paths.agentflowDirectory);
-  checks.push(check(
-    "agentflow-directory",
-    agentflowExists ? "ok" : "blocked",
-    agentflowExists ? paths.agentflowDirectory : `${paths.agentflowDirectory} is missing`,
-    agentflowExists ? undefined : "Run agentflow init."
-  ));
+async function inspectProject(paths: ProjectPaths): Promise<ProjectInspection> {
+  const checks: DoctorCheck[] = [];
+  if (!await pathExists(paths.projectRoot)) {
+    checks.push(check("project", "blocked", `${paths.projectRoot} is missing`));
+    return { status: "invalid", checks };
+  }
+  checks.push(check("project", "ok", paths.projectRoot));
+
+  let agentflowStats;
+  try {
+    agentflowStats = await lstat(paths.agentflowDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      checks.push(check(
+        "agentflow-directory",
+        "warn",
+        `${paths.agentflowDirectory} is not initialized`,
+        "The first project-changing request initializes AgentFlow automatically."
+      ));
+      return { status: "not-initialized", checks };
+    }
+    checks.push(check(
+      "agentflow-directory",
+      "blocked",
+      `Cannot inspect ${paths.agentflowDirectory}: ${error instanceof Error ? error.message : String(error)}`
+    ));
+    return { status: "invalid", checks };
+  }
+  if (!agentflowStats.isDirectory()) {
+    checks.push(check(
+      "agentflow-directory",
+      "blocked",
+      `${paths.agentflowDirectory} must be a directory`
+    ));
+    return { status: "invalid", checks };
+  }
+  checks.push(check("agentflow-directory", "ok", paths.agentflowDirectory));
 
   try {
     const parsed = parseYaml(await readFile(paths.configPath, "utf8")) as unknown;
-    const valid = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+    const valid = isRecord(parsed)
+      && parsed.version === 1
+      && parsed.pipeline === "pipeline.yaml"
+      && parsed.runsDirectory === "runs";
     checks.push(check(
       "agentflow-config",
       valid ? "ok" : "blocked",
-      valid ? `${paths.configPath} parsed` : `${paths.configPath} must contain a YAML object`
+      valid ? `${paths.configPath} parsed` : `${paths.configPath} has an invalid schema`,
+      valid ? undefined : "Repair config.yaml or reinitialize an empty project."
     ));
   } catch (error) {
     checks.push(check(
       "agentflow-config",
       "blocked",
       `Cannot parse ${paths.configPath}: ${error instanceof Error ? error.message : String(error)}`,
-      "Run agentflow init or repair config.yaml."
+      "Repair config.yaml or reinitialize an empty project."
     ));
   }
+
+  let pipeline: PipelineDefinition | undefined;
+  try {
+    pipeline = validatePipeline(parseYaml(await readFile(paths.pipelinePath, "utf8")));
+    checks.push(check("pipeline", "ok", `${pipeline.id}@${pipeline.version} parsed`));
+  } catch (error) {
+    checks.push(check(
+      "pipeline",
+      "blocked",
+      `Cannot parse ${paths.pipelinePath}: ${error instanceof Error ? error.message : String(error)}`,
+      "Repair pipeline.yaml before resuming AgentFlow."
+    ));
+  }
+
+  try {
+    const parsed = JSON.parse(await readFile(paths.currentRunPath, "utf8")) as unknown;
+    if (!isRecord(parsed) || typeof parsed.runId !== "string" || parsed.runId.length === 0) {
+      throw new Error("runId must be a non-empty string");
+    }
+    const state = await (await createEngine(paths)).loadRun(parsed.runId);
+    checks.push(check("current-run", "ok", `${state.id}@${state.revision}`));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      checks.push(check(
+        "current-run",
+        "warn",
+        `${paths.currentRunPath} does not exist; no Run has started yet`
+      ));
+    } else {
+      checks.push(check(
+        "current-run",
+        "blocked",
+        `Cannot load ${paths.currentRunPath}: ${error instanceof Error ? error.message : String(error)}`,
+        "Repair the current Run pointer without deleting existing Run history."
+      ));
+    }
+  }
+
+  return {
+    status: checks.some((item) => item.status === "blocked") ? "invalid" : "initialized",
+    checks,
+    ...(pipeline === undefined ? {} : { pipeline })
+  };
 }
 
-async function inspectSkillLock(paths: ProjectPaths, checks: DoctorCheck[]): Promise<void> {
-  const lockPath = resolve(paths.projectRoot, "skills-lock.json");
+async function inspectSkillLock(lockPath: string, checks: DoctorCheck[]): Promise<void> {
   try {
     const parsed = JSON.parse(await readFile(lockPath, "utf8")) as {
       dependencies?: Array<{ id?: unknown; commit?: unknown; skills?: Array<{ name?: unknown }> }>;
@@ -220,14 +343,16 @@ async function inspectSkillLock(paths: ProjectPaths, checks: DoctorCheck[]): Pro
       pinned && hasUseSkill
         ? `figma-use is pinned in ${lockPath}`
         : `${lockPath} does not pin the figma-use skill`,
-      pinned && hasUseSkill ? undefined : "Pin and review the official Figma MCP Server Guide before S04."
+      pinned && hasUseSkill
+        ? undefined
+        : "Pin and review the official Figma MCP Server Guide before S04."
     ));
   } catch (error) {
     checks.push(check(
       "figma-skill-lock",
       "warn",
       `Cannot inspect ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
-      "Add a reviewed skills-lock.json before using external Figma Skills."
+      "Install a reviewed skills-lock.json before using external Figma Skills."
     ));
   }
 }
@@ -236,11 +361,10 @@ async function inspectHostConfig(
   plan: HostConfigurationPlan,
   spec: HostConfigurationSpec,
   checks: DoctorCheck[]
-): Promise<void> {
+): Promise<boolean> {
   let configuration: unknown;
   try {
-    const content = await readFile(plan.targetPath, "utf8");
-    configuration = content;
+    configuration = await readFile(plan.targetPath, "utf8");
   } catch (error) {
     checks.push(check(
       "host-config",
@@ -248,7 +372,7 @@ async function inspectHostConfig(
       `Cannot read ${plan.targetPath}: ${error instanceof Error ? error.message : String(error)}`,
       `Run agentflow setup --host ${spec.client}, review the merged file, then complete OAuth.`
     ));
-    return;
+    return false;
   }
 
   const inspection = inspectHostConfiguration(spec, configuration);
@@ -257,9 +381,12 @@ async function inspectHostConfig(
       `host-config.${item.id}`,
       item.ok ? "ok" : "blocked",
       item.detail,
-      item.ok ? undefined : `Repair ${plan.targetPath}, then rerun agentflow setup --host ${spec.client}.`
+      item.ok
+        ? undefined
+        : `Repair ${plan.targetPath}, then rerun agentflow setup --host ${spec.client}.`
     ));
   }
+  return inspection.ok;
 }
 
 async function inspectTextSurface(
@@ -289,7 +416,7 @@ async function inspectTextSurface(
   }
 }
 
-async function inspectAutomaticRouting(
+async function inspectProjectInstallation(
   paths: ProjectPaths,
   host: HostClient | undefined,
   checks: DoctorCheck[]
@@ -300,14 +427,14 @@ async function inspectAutomaticRouting(
     "durable-mcp-runtime",
     runtimePath,
     (content) => content.length > 0,
-    "Run agentflow setup for the current host to install the durable MCP runtime."
+    "Run agentflow setup --scope project for the current host."
   );
   await inspectTextSurface(
     checks,
     "auto-router-skill",
     resolve(paths.projectRoot, ".agents", "skills", "agentflow-auto-router", "SKILL.md"),
     (content) => /name:\s*agentflow-auto-router\b/.test(content),
-    "Run agentflow setup to install the agentflow-auto-router Skill."
+    "Run agentflow setup --scope project to install the agentflow-auto-router Skill."
   );
 
   const agentsPath = resolve(paths.projectRoot, "AGENTS.md");
@@ -316,96 +443,189 @@ async function inspectAutomaticRouting(
     "auto-router-agents",
     agentsPath,
     (content) => content.includes("agentflow:auto-router:start"),
-    "Run agentflow setup to install the managed AGENTS.md routing block."
+    "Run agentflow setup --scope project to install the managed AGENTS.md routing block."
   );
 
-  if (!host) return;
-  const instruction = (() => {
-    switch (host) {
-      case "codex":
-        return {
-          path: agentsPath,
-          valid: (content: string) => content.includes("agentflow:auto-router:start")
-        };
-      case "cursor":
-        return {
-          path: resolve(paths.projectRoot, ".cursor", "rules", "agentflow.mdc"),
-          valid: (content: string) => /alwaysApply:\s*true/.test(content)
-            && content.includes("agentflow-auto-router")
-        };
-      case "vscode":
-        return {
-          path: resolve(paths.projectRoot, ".github", "copilot-instructions.md"),
-          valid: (content: string) => content.includes("agentflow:auto-router:start")
-        };
+  if (host) {
+    const instruction = (() => {
+      switch (host) {
+        case "codex":
+          return {
+            path: agentsPath,
+            valid: (content: string) => content.includes("agentflow:auto-router:start")
+          };
+        case "cursor":
+          return {
+            path: resolve(paths.projectRoot, ".cursor", "rules", "agentflow.mdc"),
+            valid: (content: string) => /alwaysApply:\s*true/.test(content)
+              && content.includes("agentflow-auto-router")
+          };
+        case "vscode":
+          return {
+            path: resolve(paths.projectRoot, ".github", "copilot-instructions.md"),
+            valid: (content: string) => content.includes("agentflow:auto-router:start")
+          };
+      }
+    })();
+    await inspectTextSurface(
+      checks,
+      `auto-router-instruction.${host}`,
+      instruction.path,
+      instruction.valid,
+      `Run agentflow setup --scope project --host ${host}.`
+    );
+  }
+
+  await inspectSkillLock(resolve(paths.projectRoot, "skills-lock.json"), checks);
+  if (host) {
+    const spec = durableHostConfigurationSpec(host, paths.projectRoot);
+    const plan = planHostConfiguration(spec);
+    if (await inspectHostConfig(plan, spec, checks)) {
+      checks.push(check(
+        "host-restart-auth",
+        "warn",
+        "Static setup is healthy; host restart and Figma OAuth require a live host check",
+        plan.authentication.instructions
+      ));
     }
-  })();
+  }
+}
+
+function globalHostTarget(paths: GlobalInstallationPaths, host: HostClient): string {
+  switch (host) {
+    case "codex": return paths.codexConfig;
+    case "cursor": return paths.cursorConfig;
+    case "vscode": return paths.vscodeConfig;
+  }
+}
+
+function globalHostPlan(
+  spec: HostConfigurationSpec,
+  targetPath: string
+): HostConfigurationPlan {
+  const authentication = planHostConfiguration({
+    ...spec,
+    projectRoot: dirname(targetPath)
+  }).authentication;
+  return {
+    client: spec.client,
+    targetPath,
+    content: "",
+    authentication
+  };
+}
+
+async function inspectGlobalInstallation(
+  paths: GlobalInstallationPaths,
+  host: HostClient | undefined,
+  checks: DoctorCheck[]
+): Promise<void> {
   await inspectTextSurface(
     checks,
-    `auto-router-instruction.${host}`,
-    instruction.path,
-    instruction.valid,
-    `Run agentflow setup --host ${host} to install the host instruction surface.`
+    "global-cli-runtime",
+    paths.runtimeCli,
+    (content) => content.length > 0,
+    "Run global agentflow setup again to restore the CLI runtime."
   );
+  await inspectTextSurface(
+    checks,
+    "global-mcp-runtime",
+    paths.runtimeMcp,
+    (content) => content.length > 0,
+    "Run global agentflow setup again to restore the MCP runtime."
+  );
+  await inspectTextSurface(
+    checks,
+    "auto-router-skill",
+    resolve(paths.skillsRoot, "agentflow-auto-router", "SKILL.md"),
+    (content) => /name:\s*agentflow-auto-router\b/.test(content),
+    "Run global agentflow setup again to restore the routing Skill."
+  );
+  await inspectTextSurface(
+    checks,
+    "global-install-manifest",
+    paths.installManifest,
+    (content) => {
+      try {
+        const manifest = JSON.parse(content) as unknown;
+        return isRecord(manifest)
+          && typeof manifest.version === "string"
+          && isRecord(manifest.runtime)
+          && manifest.runtime.cli === paths.runtimeCli
+          && manifest.runtime.mcp === paths.runtimeMcp;
+      } catch {
+        return false;
+      }
+    },
+    "Run global agentflow setup again to restore install metadata."
+  );
+  await inspectSkillLock(paths.skillsLock, checks);
+
+  if (host) {
+    const spec: HostConfigurationSpec = {
+      client: host,
+      agentflowMcpEntryPoint: paths.runtimeMcp
+    };
+    const plan = globalHostPlan(spec, globalHostTarget(paths, host));
+    if (await inspectHostConfig(plan, spec, checks)) {
+      checks.push(check(
+        "host-restart-auth",
+        "warn",
+        "Static setup is healthy; host restart and Figma OAuth require a live host check",
+        plan.authentication.instructions
+      ));
+    }
+  }
 }
 
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
-  const checks: DoctorCheck[] = [];
+  const scope = options.scope ?? "project";
+  const installationChecks: DoctorCheck[] = [];
   const nodeMajor = Number.parseInt(process.versions.node, 10);
-  checks.push(check(
+  installationChecks.push(check(
     "node",
     nodeMajor >= 20 ? "ok" : "blocked",
     `Node ${process.versions.node}`,
     nodeMajor >= 20 ? undefined : "Install Node.js 20 or newer."
   ));
-  await inspectGit(checks, options.gitRunner ?? nativeGitRunner);
-  await inspectProjectConfiguration(options.paths, checks);
-  await inspectAutomaticRouting(options.paths, options.host, checks);
+  await inspectGit(installationChecks, options.gitRunner ?? nativeGitRunner);
 
-  let pipeline: PipelineDefinition | undefined;
-  try {
-    pipeline = await loadPipeline(options.paths);
-    checks.push(check("pipeline", "ok", `${pipeline.id}@${pipeline.version} parsed`));
-  } catch (error) {
-    checks.push(check(
-      "pipeline",
-      "blocked",
-      `Cannot parse ${options.paths.pipelinePath}: ${error instanceof Error ? error.message : String(error)}`
-    ));
+  if (scope === "global") {
+    const globalPaths = globalInstallationPaths(
+      options.globalPathEnvironment ?? processGlobalPathEnvironment(),
+      options.vscodeConfig === undefined ? {} : { vscodeConfig: options.vscodeConfig }
+    );
+    await inspectGlobalInstallation(globalPaths, options.host, installationChecks);
+  } else {
+    await inspectProjectInstallation(options.paths, options.host, installationChecks);
   }
 
-  await inspectSkillLock(options.paths, checks);
-
-  if (options.host) {
-    const spec = durableHostConfigurationSpec(options.host, options.paths.projectRoot);
-    await inspectHostConfig(planHostConfiguration(spec), spec, checks);
-    if (!checks.some((item) => item.status === "blocked" || item.status === "needs_user")) {
-      checks.push(check(
-        "host-restart-auth",
-        "warn",
-        "Static setup is healthy; host restart and Figma OAuth cannot be verified from project files",
-        planHostConfiguration(spec).authentication.instructions
-      ));
-    }
-  }
-
+  const project = await inspectProject(options.paths);
   let required: string[] = [];
-  if (options.stageId && pipeline) {
-    try {
-      required = stageById(pipeline, options.stageId).requiredCapabilities;
-      checks.push(check(
-        "stage-capability-contract",
-        required.length > 0 ? "ok" : "warn",
-        required.length > 0
-          ? `${options.stageId} requires ${required.length} live capabilities`
-          : `${options.stageId} has no live capability requirements`
-      ));
-    } catch (error) {
-      checks.push(check(
+  if (options.stageId) {
+    if (project.pipeline === undefined) {
+      installationChecks.push(check(
         "stage-capability-contract",
         "blocked",
-        error instanceof Error ? error.message : String(error)
+        `Cannot inspect ${options.stageId} until the project pipeline is valid`
       ));
+    } else {
+      try {
+        required = stageById(project.pipeline, options.stageId).requiredCapabilities;
+        installationChecks.push(check(
+          "stage-capability-contract",
+          required.length > 0 ? "ok" : "warn",
+          required.length > 0
+            ? `${options.stageId} requires ${required.length} live capabilities`
+            : `${options.stageId} has no live capability requirements`
+        ));
+      } catch (error) {
+        installationChecks.push(check(
+          "stage-capability-contract",
+          "blocked",
+          error instanceof Error ? error.message : String(error)
+        ));
+      }
     }
   }
 
@@ -414,7 +634,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const missing = required.filter((capability) => !normalized.available.includes(capability));
   if (required.length > 0) {
     if (!options.host) {
-      checks.push(check(
+      installationChecks.push(check(
         "live-capability-host",
         "blocked",
         "A host must be named for a live stage capability probe",
@@ -422,23 +642,21 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       ));
     }
     if (!liveProbeProvided) {
-      checks.push(check(
+      installationChecks.push(check(
         "live-capability-probe",
         "blocked",
         "No live host capability snapshot was supplied",
-        "Probe the current host tool and Skill registry, call Figma whoami, then rerun doctor with --live-probe and canonical --capability values."
+        "Probe the current host registry and Figma whoami, then rerun doctor with --live-probe and canonical --capability values."
       ));
     } else if (missing.length > 0) {
-      checks.push(check(
+      installationChecks.push(check(
         "live-capability-probe",
         "blocked",
         `Missing live capabilities: ${missing.join(", ")}`,
-        options.host
-          ? planHostConfiguration(hostConfigurationSpec(options.host, options.paths.projectRoot)).authentication.instructions
-          : "Configure and authenticate Figma in the current host, then probe again."
+        "Configure and authenticate Figma in the current host, then probe again."
       ));
     } else {
-      checks.push(check(
+      installationChecks.push(check(
         "live-capability-probe",
         "ok",
         `All ${required.length} required capabilities were observed live`
@@ -446,19 +664,32 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     }
   }
   if (normalized.ignored.length > 0) {
-    checks.push(check(
+    installationChecks.push(check(
       "capability-identifiers",
       "warn",
       `Ignored non-canonical or untrusted capability names: ${normalized.ignored.join(", ")}`
     ));
   }
 
-  const status = reportStatus(checks);
+  const installationStatus = reportStatus(installationChecks);
+  const projectCheckStatus = reportStatus(project.checks);
+  const status: DoctorOverallStatus = installationStatus === "blocked" || project.status === "invalid"
+    ? "blocked"
+    : installationStatus === "warn"
+      || project.status === "not-initialized"
+      || projectCheckStatus === "warn"
+      ? "warn"
+      : "ok";
+  const checks = [...installationChecks, ...project.checks];
+
   return {
-    ok: status === "ok" || status === "warn",
+    ok: status !== "blocked",
     status,
+    scope,
     ...(options.host === undefined ? {} : { host: options.host }),
     ...(options.stageId === undefined ? {} : { stageId: options.stageId }),
+    installation: { status: installationStatus, checks: installationChecks },
+    project: { status: project.status, checks: project.checks },
     checks,
     capabilities: {
       liveProbeProvided,

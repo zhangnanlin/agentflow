@@ -49,6 +49,12 @@ import {
   createEngine
 } from "./runtime.js";
 
+declare const __AGENTFLOW_VERSION__: string | undefined;
+
+const agentFlowVersion = typeof __AGENTFLOW_VERSION__ === "string"
+  ? __AGENTFLOW_VERSION__
+  : "0.3.0";
+
 const IdentifierSchema = z.string()
   .min(1)
   .max(160)
@@ -95,7 +101,7 @@ export interface AgentFlowMcpServerOptions {
 export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}): McpServer {
   const server = new McpServer({
     name: "agentflow",
-    version: "0.1.0"
+    version: agentFlowVersion
   }, {
     instructions: AGENTFLOW_MCP_INSTRUCTIONS
   });

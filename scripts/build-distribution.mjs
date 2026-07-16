@@ -5,6 +5,10 @@ import { build } from "esbuild";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bundleDirectory = resolve(root, "bundle");
+const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
+  throw new TypeError("package.json must declare a non-empty version");
+}
 await mkdir(bundleDirectory, { recursive: true });
 
 const shared = {
@@ -12,6 +16,9 @@ const shared = {
   platform: "node",
   format: "esm",
   target: "node20",
+  define: {
+    __AGENTFLOW_VERSION__: JSON.stringify(packageJson.version)
+  },
   sourcemap: true,
   legalComments: "eof",
   banner: {
