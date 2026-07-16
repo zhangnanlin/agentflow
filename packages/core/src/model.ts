@@ -304,6 +304,7 @@ export const RunEventSchema = z.object({
 export const IdempotencyRecordSchema = z.object({
   operation: z.string().min(1),
   actorId: IdSchema,
+  inputHash: Sha256Schema.optional(),
   reason: z.string().min(1).optional(),
   recordedAt: IsoDateSchema
 });
@@ -360,6 +361,7 @@ export interface Actor {
 export interface MutationContext {
   expectedRevision: number;
   idempotencyKey: string;
+  inputHash?: string;
   actor: Actor;
   reason?: string;
 }

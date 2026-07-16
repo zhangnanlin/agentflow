@@ -78,6 +78,16 @@ export class JsonRunStore implements RunStore {
           "IDEMPOTENCY_CONFLICT",
           { idempotencyKey: options.idempotencyKey }
         );
+        invariant(
+          prior.inputHash === options.inputHash,
+          "Idempotency key input does not match the recorded operation",
+          "IDEMPOTENCY_CONFLICT",
+          {
+            idempotencyKey: options.idempotencyKey,
+            recordedInputHash: prior.inputHash,
+            requestedInputHash: options.inputHash
+          }
+        );
         return current;
       }
 
@@ -95,6 +105,7 @@ export class JsonRunStore implements RunStore {
       next.idempotency[options.idempotencyKey] = {
         operation: options.operation,
         actorId: options.actor.id,
+        ...(options.inputHash === undefined ? {} : { inputHash: options.inputHash }),
         ...(options.reason === undefined ? {} : { reason: options.reason }),
         recordedAt: now
       };

@@ -18,6 +18,7 @@ import {
   WorkerResultSchema,
   WorkerSchema,
   type Actor,
+  type Gate,
   type MutationContext,
   type PipelineDefinition,
   type RunState,
@@ -81,6 +82,12 @@ export interface ResolveGateInput {
   decision: "approved" | "rejected";
   resolution: string;
   choice?: string;
+}
+
+export interface HumanGateInspection {
+  state: RunState;
+  gate: Gate;
+  artifactHashes: Record<string, string>;
 }
 
 export interface PrepareWorkerInput {
@@ -191,6 +198,49 @@ export class AgentFlowEngine {
 
   loadRun(runId: string): Promise<RunState> {
     return this.store.load(runId);
+  }
+
+  async inspectHumanGate(
+    runId: string,
+    gateId: string,
+    expectedRevision: number
+  ): Promise<HumanGateInspection> {
+    const state = await this.store.load(runId);
+    invariant(
+      state.revision === expectedRevision,
+      `Expected revision ${expectedRevision}, found ${state.revision}`,
+      "REVISION_CONFLICT",
+      { expectedRevision, actualRevision: state.revision }
+    );
+    const gate = state.gates[gateId];
+    invariant(gate, `Gate not found: ${gateId}`, "GATE_NOT_FOUND");
+    invariant(gate.type === "human", `Gate is not human: ${gateId}`, "GATE_NOT_HUMAN");
+    invariant(gate.status === "pending", `Gate is already ${gate.status}`, "GATE_NOT_PENDING");
+    invariant(
+      state.activeStageId === gate.stageId && state.stages[gate.stageId]?.status === "active",
+      `Gate Stage is not active: ${gate.stageId}`,
+      "GATE_STAGE_NOT_ACTIVE",
+      { gateId, gateStageId: gate.stageId, activeStageId: state.activeStageId }
+    );
+
+    const stage = stageById(this.pipeline, gate.stageId);
+    const artifacts = Object.values(state.artifacts)
+      .filter((artifact) => artifact.stageId === gate.stageId && !artifact.stale);
+    const artifactKinds = new Set(artifacts.map((artifact) => artifact.kind));
+    for (const kind of stage.requiredArtifactKinds) {
+      invariant(
+        artifactKinds.has(kind),
+        `Cannot inspect gate without artifact kind: ${kind}`,
+        "GATE_ARTIFACT_MISSING",
+        { gateId, kind }
+      );
+    }
+
+    return {
+      state,
+      gate: structuredClone(gate),
+      artifactHashes: Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact.sha256]))
+    };
   }
 
   reportStagePreflight(

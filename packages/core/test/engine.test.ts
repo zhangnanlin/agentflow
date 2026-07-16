@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -120,6 +120,55 @@ describe("AgentFlowEngine", () => {
       stageId: "S00",
       title: "Stale mutation"
     }, { ...mutation, idempotencyKey: "different-key" })).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+  });
+
+  it("binds fingerprinted retries to immutable inputs while preserving legacy retries", async () => {
+    let state = await engine.createRun({ id: "run-fingerprinted-retry", requirement: "Bind retries" });
+    const mutation: MutationContext = {
+      expectedRevision: state.revision,
+      idempotencyKey: "fingerprinted-create",
+      inputHash: "a".repeat(64),
+      actor: supervisor
+    };
+    state = await engine.createTask(state.id, {
+      id: "task-fingerprinted",
+      stageId: "S00",
+      title: "Fingerprint replay"
+    }, mutation);
+
+    const replayed = await engine.createTask(state.id, {
+      id: "task-fingerprinted",
+      stageId: "S00",
+      title: "Fingerprint replay"
+    }, mutation);
+    expect(replayed.revision).toBe(state.revision);
+
+    await expect(engine.createTask(state.id, {
+      id: "task-different-hash",
+      stageId: "S00",
+      title: "Reject different hash"
+    }, { ...mutation, inputHash: "b".repeat(64) })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+    const { inputHash: _inputHash, ...hashlessMutation } = mutation;
+    await expect(engine.createTask(state.id, {
+      id: "task-missing-hash",
+      stageId: "S00",
+      title: "Reject missing hash"
+    }, hashlessMutation)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+    let legacyState = await engine.createRun({ id: "run-legacy-retry", requirement: "Keep legacy retries" });
+    const legacyMutation = context(legacyState, supervisor, "legacy-create");
+    legacyState = await engine.createTask(legacyState.id, {
+      id: "legacy-task",
+      stageId: "S00",
+      title: "Legacy replay"
+    }, legacyMutation);
+    const legacyReplay = await engine.createTask(legacyState.id, {
+      id: "legacy-task",
+      stageId: "S00",
+      title: "Legacy replay"
+    }, legacyMutation);
+    expect(legacyReplay.revision).toBe(legacyState.revision);
   });
 
   it("uses leases and prevents overlapping write scopes", async () => {
@@ -548,6 +597,112 @@ describe("AgentFlowEngine", () => {
     }, context(state, user, "approve"));
     state = await engine.completeStage(state.id, "S02", context(state, supervisor, "complete-stage"));
     expect(state.activeStageId).toBe("S03");
+  });
+
+  it("inspects only the current pending human Gate with required Artifacts", async () => {
+    let state = await engine.createRun({ id: "run-inspect-gate", requirement: "Inspect requirements Gate" });
+    const path = join(directory, state.id, "state.json");
+
+    const beforeOutOfStage = await readFile(path, "utf8");
+    await expect(engine.inspectHumanGate(
+      state.id,
+      "requirements-approved",
+      state.revision
+    )).rejects.toMatchObject({ code: "GATE_STAGE_NOT_ACTIVE" });
+    expect(await readFile(path, "utf8")).toBe(beforeOutOfStage);
+
+    state = await completeStage(state, "S00");
+    state = await completeStage(state, "S01");
+    const beforeMissingArtifact = await readFile(path, "utf8");
+    await expect(engine.inspectHumanGate(
+      state.id,
+      "requirements-approved",
+      state.revision
+    )).rejects.toMatchObject({ code: "GATE_ARTIFACT_MISSING" });
+    expect(await readFile(path, "utf8")).toBe(beforeMissingArtifact);
+
+    state = await artifact(state, "S02", "prd");
+    const beforeInspection = await readFile(path, "utf8");
+    const inspected = await engine.inspectHumanGate(
+      state.id,
+      "requirements-approved",
+      state.revision
+    );
+    expect(inspected.gate).toMatchObject({
+      id: "requirements-approved",
+      type: "human",
+      status: "pending"
+    });
+    expect(inspected.artifactHashes).toEqual({
+      "s02-prd": state.artifacts["s02-prd"]?.sha256
+    });
+    expect(await readFile(path, "utf8")).toBe(beforeInspection);
+
+    await expect(engine.inspectHumanGate(
+      state.id,
+      "missing-gate",
+      state.revision
+    )).rejects.toMatchObject({ code: "GATE_NOT_FOUND" });
+    await expect(engine.inspectHumanGate(
+      state.id,
+      "requirements-approved",
+      state.revision - 1
+    )).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+
+    state = await engine.resolveGate(state.id, {
+      gateId: "requirements-approved",
+      decision: "approved",
+      resolution: "Approved after inspection"
+    }, context(state, user, "approve-inspected-gate"));
+    const beforeResolvedInspection = await readFile(path, "utf8");
+    await expect(engine.inspectHumanGate(
+      state.id,
+      "requirements-approved",
+      state.revision
+    )).rejects.toMatchObject({ code: "GATE_NOT_PENDING" });
+    expect(await readFile(path, "utf8")).toBe(beforeResolvedInspection);
+  });
+
+  it("rejects automatic Gates from human Gate inspection without mutation", async () => {
+    const automaticPipeline = validatePipeline({
+      id: "automatic-gate-pipeline",
+      version: "1",
+      name: "Automatic Gate pipeline",
+      stages: [{
+        id: "S0",
+        name: "Automatic review",
+        requiredArtifactKinds: ["report"],
+        requiredGate: {
+          id: "automatic-review",
+          type: "automatic",
+          question: "Did automatic checks pass?",
+          options: ["approve", "reject"]
+        }
+      }]
+    });
+    const automaticEngine = new AgentFlowEngine(new JsonRunStore(directory), automaticPipeline);
+    let state = await automaticEngine.createRun({ id: "run-automatic-gate", requirement: "Reject automatic Gate" });
+    state = await automaticEngine.registerArtifact(state.id, {
+      id: "automatic-report",
+      stageId: "S0",
+      kind: "report",
+      uri: ".agentflow/S0/report.json",
+      sha256: sha256("automatic-report"),
+      producedBy: "worker-a"
+    }, {
+      expectedRevision: state.revision,
+      idempotencyKey: "automatic-report",
+      actor: workerA
+    });
+    const path = join(directory, state.id, "state.json");
+    const before = await readFile(path, "utf8");
+
+    await expect(automaticEngine.inspectHumanGate(
+      state.id,
+      "automatic-review",
+      state.revision
+    )).rejects.toMatchObject({ code: "GATE_NOT_HUMAN" });
+    expect(await readFile(path, "utf8")).toBe(before);
   });
 
   it("requires a structured choice for the design direction gate", async () => {

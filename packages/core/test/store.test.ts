@@ -51,4 +51,38 @@ describe("JsonRunStore", () => {
 
     await expect(store.load(state.id)).resolves.toMatchObject({ preflights: {} });
   });
+
+  it("persists fingerprinted idempotency while loading legacy hashless records", async () => {
+    const store = new JsonRunStore(directory);
+    const engine = new AgentFlowEngine(store, defaultPipeline);
+    let state = await engine.createRun({ id: "run-idempotency-hash", requirement: "Bind retries to inputs" });
+    const mutation = {
+      expectedRevision: state.revision,
+      idempotencyKey: "fingerprinted-create",
+      inputHash: "a".repeat(64),
+      actor: { id: "supervisor", kind: "supervisor" as const }
+    };
+
+    state = await engine.createTask(state.id, {
+      id: "fingerprinted-task",
+      stageId: "S00",
+      title: "Fingerprint replay"
+    }, mutation);
+    expect(state.idempotency[mutation.idempotencyKey]?.inputHash).toBe(mutation.inputHash);
+
+    const path = join(directory, state.id, "state.json");
+    const legacy = JSON.parse(await readFile(path, "utf8")) as {
+      idempotency: Record<string, { inputHash?: string }>;
+    };
+    delete legacy.idempotency[mutation.idempotencyKey]?.inputHash;
+    await writeFile(path, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+
+    await expect(store.load(state.id)).resolves.toMatchObject({
+      idempotency: {
+        [mutation.idempotencyKey]: {
+          operation: "task.create"
+        }
+      }
+    });
+  });
 });
