@@ -34,9 +34,15 @@ Keep the AgentFlow state store, not chat history, as the source of truth. Act as
 
 ## User Decisions
 
-Inspect repository and Run evidence first. Use `structured_choice_request` for a material bounded choice across modes, or an already exposed native structured-input control as an equivalent. Batch no more than three independent questions, ask dependent questions later, and use one concise text fallback only after structured input is unavailable. Never repeat accepted answers.
+Inspect repository and Run evidence first. Apply the recommended default without asking when a choice is non-mandatory, and persist the selected value, recommendation source, and concise rationale in the Task result or produced Artifact. Do not open a structured interaction for an ordinary recommended default.
+
+Use `structured_choice_request` for a genuinely blocking material choice without a safe default across modes, or an already exposed native structured-input control as an equivalent. Batch no more than three independent questions, ask dependent questions later, and use one concise text fallback only after structured input is unavailable. Never repeat accepted answers.
 
 For a pending human Gate, prefer `gate_decision_request`; it reads the persisted question and options, binds the current Artifact hash, and applies one accepted response through Core. Use `gate_resolve` only as compatibility fallback after an explicit text answer. Never infer a decision from recommendation, silence, timeout, cancellation, or unrelated approval. On resume, reload persisted Gate state before deciding whether another interaction is needed.
+
+## Skill Policy
+
+Use bundled Skills and externally installed Skills only when the current `skills-lock.json` policy validates their immutable commit, license, content hash, reviewed scripts and tool scope, audit evidence, adapter compatibility, and manual approval. `skills.sh` is discovery evidence only; never install, enable, or execute a candidate from discovery output. If no validated policy authorizes a candidate, continue with Core rules or the safe inline/serial fallback.
 
 ## Mutation Rules
 

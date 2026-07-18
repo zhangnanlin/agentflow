@@ -293,7 +293,10 @@ describe("standalone AgentFlow distribution", () => {
     expect(orchestratorSkill).toContain("per-call project");
     expect(orchestratorSkill).toContain("run_start_or_resume");
     expect(routerSkill).toContain("agentflow:full");
+    expect(routerSkill).toContain("Do not call `structured_choice_request` for a non-mandatory choice");
     expect(orchestratorSkill).toContain("workflow_escalate");
+    expect(orchestratorSkill).toContain("Apply the recommended default without asking");
+    expect(orchestratorSkill).toContain("`skills.sh` is discovery evidence only");
     expect(orchestratorSkill).toContain("zero inherited conversation turns");
     expect(orchestratorSkill).toContain("continue its own Task");
     expect(codexHostBridgeSkill).toContain("inheritedTurnCount: 0");
@@ -570,7 +573,9 @@ describe("standalone AgentFlow distribution", () => {
       readFile(join(home, ".agents", "skills", "agentflow-codex-host-bridge", "SKILL.md"), "utf8")
     ]);
     expect(installedRouter).toContain("agentflow:full");
+    expect(installedRouter).toContain("non-mandatory choice");
     expect(installedOrchestrator).toContain("workflow_escalate");
+    expect(installedOrchestrator).toContain("Apply the recommended default without asking");
     expect(installedCodexBridge).toContain("host.user-input.structured");
     expect(installedCodexBridge).toContain("worker_cleanup_record");
 

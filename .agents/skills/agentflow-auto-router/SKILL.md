@@ -31,7 +31,9 @@ Read [references/routing-contract.md](references/routing-contract.md) when the r
 
 ## Reduce User Input
 
-Inspect repository and Run evidence before asking anything. For a material bounded choice, use `structured_choice_request` or an already exposed native structured-input control. Batch at most three independent questions, but keep dependent questions sequential. Use one concise text fallback only when structured input is unavailable, and never repeat an accepted answer.
+Inspect repository and Run evidence before asking anything. Classify the choice as mandatory or non-mandatory first. When a non-mandatory choice has a documented recommendation, apply that recommendation without asking and record the selected value plus rationale in the relevant Task result or Artifact. Do not call `structured_choice_request` for a non-mandatory choice that has a recommendation.
+
+Use `structured_choice_request` or an already exposed native structured-input control only for a genuinely blocking material choice without a safe recommended default. Batch at most three independent questions, but keep dependent questions sequential. Use one concise text fallback only when structured input is unavailable, and never repeat an accepted answer.
 
 Pending human Gates are not normal clarification. Let `agentflow-orchestrator` use `gate_decision_request` so the persisted Gate and current Artifact hash remain authoritative; never treat a recommendation, silence, timeout, cancellation, or unrelated approval as a decision.
 
