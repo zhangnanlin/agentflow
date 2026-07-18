@@ -65,6 +65,28 @@ All three profiles instruct the Worker to consume only the bounded Task envelope
 
 A valid profile file proves only static setup intent. Before native delegation, the live host adapter must still attest zero-history context, an enforced bounded tool profile, AgentFlow MCP disabled, and the required lifecycle operations. Missing or non-conforming evidence causes inline or serial Supervisor fallback; AgentFlow does not infer conformance from files, prose, or GUI state.
 
+### Native Execution Lifecycle
+
+For each independent wave, the Supervisor claims one eligible Task and continues that work while conforming native Workers execute the remaining disjoint Tasks. It uses one event-driven `waitAny` or completion notification for active Workers; heartbeats and timers do not consume model turns. AgentFlow never launches a custom Agent CLI Worker process.
+
+The native v2 handle must match the prepared Worker ID, Task ID, native ID, task name, prompt hash, adapter version, prompt byte count, context policy, and tool policy. `inheritedTurnCount` must be `0`; the allowlist must be enforced and must exclude AgentFlow MCP and nested-agent tools. Any mismatch fails closed before binding.
+
+Cleanup is durable first and visible second:
+
+1. Collect and persist a valid terminal result, or persist a confirmed failure or interruption.
+2. Close native execution when supported.
+3. Archive the child task when the host reports archive support. Never archive the Supervisor task.
+4. Release the exact host Worker permit.
+5. Persist the host-, adapter-version-, Worker-, and native-ID-bound receipt with `worker_cleanup_record`.
+
+Codex child tasks are removed after successful supported archive. Cursor or VS Code operations that are unavailable are recorded as `unsupported`, not treated as success. Resume re-probes capabilities and retries only supported incomplete cleanup; it never redispatches a Task whose result is already durable.
+
+### Host Budget And 429 Recovery
+
+The scheduler state lives under `~/.agentflow/scheduler` and is shared by MCP processes for the same sanitized host/profile budget key. Capacity defaults to one active model Worker. Leases and host-side heartbeats prevent abandoned permits from becoming permanent, and expiry requires confirmed recovery before reuse.
+
+A classified 429 opens a persisted circuit. AgentFlow honors bounded `Retry-After` when present; otherwise it applies bounded exponential backoff with jitter. Dispatch during cooldown performs no native spawn, and a half-open circuit permits one recovery probe. Deterministic operations bypass the model permit rather than increasing concurrency.
+
 ## Merge And Transaction Rules
 
 Setup structurally merges only the `agentflow` and `figma` MCP entries. It preserves unrelated TOML/JSON settings and servers. It rejects malformed configuration, conflicting managed servers, different same-name Skills, path traversal, linked parents, changed targets, and unsafe overwrite races.
@@ -102,7 +124,7 @@ Static configuration is not proof of restart or OAuth. AgentFlow records those u
 
 ## Structured User Input
 
-For material bounded decisions, AgentFlow requests clickable choices through MCP form elicitation or an already exposed host-native structured control. It may batch at most three independent questions; dependent questions remain sequential, and recommendations never preselect an answer. The form accepts only non-sensitive single-select values and rejects secrets, credentials, payment data, and OAuth fields.
+For a non-mandatory choice with a documented recommendation, AgentFlow applies and records that default without opening a user interaction. For a genuinely blocking material choice without a safe default, it requests clickable choices through MCP form elicitation or an already exposed host-native structured control. It may batch at most three independent questions; dependent questions remain sequential, and recommendations shown in a control never preselect an answer. The form accepts only non-sensitive single-select values and rejects secrets, credentials, payment data, and OAuth fields.
 
 A pending human Gate is presented from persisted Run state and finalized in one explicit interaction bound to the current Artifact hash. Decline, cancellation, timeout, disconnect, stale revision, and concurrent conflict paths leave the Gate unchanged. When structured controls are unsupported, AgentFlow issues one concise text fallback and does not repeat an accepted answer.
 

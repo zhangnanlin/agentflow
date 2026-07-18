@@ -66,9 +66,31 @@ It does not copy the runtime, Skills, routing instructions, or host configuratio
 
 `agentflow:on` forces routing for one request. `agentflow:off` bypasses it for one request. Human Requirements, Design Direction, Design Freeze, Engineering Plan, and Release Gates remain explicit.
 
+## Adaptive Workflow
+
+New MCP Runs use a versioned deterministic policy and persist the selected lane, matched signals, explanation, eligible Stages, and later escalation history:
+
+| Lane | Typical request | Eligible Stages |
+| --- | --- | --- |
+| `Quick` | Low-risk change in an existing non-UI project | Intake, implementation, system QA, completion verification |
+| `Standard` | New non-UI project or bounded multi-module change | Discovery, requirements, architecture, planning, implementation, integration, QA, completion verification |
+| `Full` | UI, migration, destructive Git, security, release, publication, deployment, or cross-module contract work | The complete compatible pipeline and every applicable Gate |
+
+The policy can only escalate. If repository or Task evidence reveals a higher-risk signal later, the Supervisor records it through `workflow_escalate`; a completed Run cannot be changed and an active Run never downgrades. Add `agentflow:full` to one requirement to select Full explicitly without bypassing any Gate. Existing callers and migrated 0.4.0 Runs retain legacy Full behavior.
+
+Recommended defaults are applied automatically only to non-mandatory choices. Requirements, design direction, design freeze, engineering plan, and release decisions remain pending until the user explicitly approves the current Artifact hash. See [Adaptive Workflow Operations](./docs/adaptive-workflow.md) for routing signals, response profiles, rollout, and rollback.
+
+## Native Collaboration
+
+The Supervisor remains productive during a parallel wave: it claims one eligible Task itself and delegates only the other independent Tasks. A delegated Worker must be a Codex, Cursor, or VS Code native task with zero inherited conversation turns, a bounded prompt, an enforced tool allowlist, and AgentFlow MCP disabled. AgentFlow never starts a custom Agent CLI process as fallback; a missing or non-conforming native adapter reduces work to inline or serial Supervisor execution.
+
+Model work uses a process-safe host/profile budget with one active Worker by default. The first classified 429 opens a shared cooldown, honors `Retry-After` when present, otherwise uses bounded exponential backoff with jitter, and prevents duplicate spawn during cooldown. Deterministic Git sync, verification, readback, timers, and explicit waits do not consume a model permit.
+
+Terminal evidence is persisted before cleanup. AgentFlow then closes native execution, archives the child task when the host reports archive support, releases the exact permit, and records one adapter-bound cleanup receipt. Unsupported operations remain explicit; completed work is not redispatched during cleanup recovery. See [Host Setup](./docs/HOST_SETUP.md) for native profiles and diagnostics.
+
 ## Structured Choices
 
-AgentFlow presents material bounded decisions as clickable choices instead of asking the user to type an option. It may batch at most three independent questions in one control; dependent questions remain sequential. Recommendations are display-only and never preselect an answer. An already exposed host-native structured control may be used as an equivalent to MCP form elicitation.
+AgentFlow applies a documented recommendation without asking when a choice is non-mandatory and records the selected value and rationale in the relevant Task result or Artifact. For a genuinely blocking choice without a safe default, it presents clickable choices instead of asking the user to type one. It may batch at most three independent questions in one control; dependent questions remain sequential. Recommendations shown inside a control are display-only and never preselect an answer. An already exposed host-native structured control may be used as an equivalent to MCP form elicitation.
 
 For a pending human Gate, AgentFlow derives the question and options from persisted Run state and applies an accepted answer in one explicit interaction bound to the current Artifact hash. Decline, cancellation, timeout, disconnect, a stale revision, or a concurrent conflict leaves the Gate unchanged. If structured input is unsupported, AgentFlow uses one concise text fallback and does not ask again after accepting the answer.
 
