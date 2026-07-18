@@ -216,6 +216,17 @@ describe("M2 product-to-Figma concept flow", () => {
       followUps: [],
       completedAt: new Date().toISOString()
     }, context(state, supervisor, "collect-figma-writer"));
+    state = await engine.recordWorkerCleanup(state.id, {
+      workerId: writer.id,
+      step: "archive",
+      status: "unsupported",
+      reason: "The fixture host has no archive capability"
+    }, context(state, supervisor, "record-archive-unsupported"));
+    state = await engine.recordWorkerCleanup(state.id, {
+      workerId: writer.id,
+      step: "permitRelease",
+      status: "completed"
+    }, context(state, supervisor, "record-permit-release"));
 
     const concepts = conceptSet(artifactPayloadHash("ux-architecture", ux));
     state = await registerContract(engine, state, "concept-set-1", "S04", "design-concepts", concepts, context);

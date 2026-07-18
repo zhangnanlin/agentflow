@@ -21,6 +21,7 @@ import {
   type Gate,
   type MutationContext,
   type PipelineDefinition,
+  type RoutingSignal,
   type RunState,
   type Task,
   type TaskWorkspace,
@@ -31,12 +32,20 @@ import {
 } from "./model.js";
 import { downstreamStageIds, readyStages, stageById, validatePipeline } from "./pipeline.js";
 import type { RunStore } from "./store.js";
+import {
+  escalateWorkflow,
+  evaluateWorkflowPolicy,
+  legacyFullWorkflow,
+  requiredArtifactKindsForLane
+} from "./workflow-policy.js";
 
 export interface CreateRunInput {
   id?: string;
   requirement: string;
   projectType?: "new" | "existing";
   hasUi?: boolean;
+  routingSignals?: RoutingSignal[];
+  laneOverride?: "full";
 }
 
 export interface CreateTaskInput {
@@ -112,6 +121,19 @@ export interface CompleteInlineTaskInput {
   };
 }
 
+export interface ClaimInlineTaskInput {
+  taskId: string;
+  leaseSeconds: number;
+  workspace: Omit<TaskWorkspace, "boundAt">;
+}
+
+export interface RecordWorkerCleanupInput {
+  workerId: string;
+  step: "close" | "archive" | "permitRelease";
+  status: "completed" | "unsupported" | "failed";
+  reason?: string;
+}
+
 export interface AcquireResourceInput {
   resourceId: string;
   kind: string;
@@ -180,6 +202,17 @@ export class AgentFlowEngine {
       projectType: input.projectType ?? "new",
       hasUi: input.hasUi ?? true,
       status: "active",
+      workflow: input.routingSignals === undefined && input.laneOverride === undefined
+        ? legacyFullWorkflow(this.pipeline.stages.map((stage) => stage.id))
+        : evaluateWorkflowPolicy({
+          requirement: input.requirement,
+          projectType: input.projectType ?? "new",
+          hasUi: input.hasUi ?? true,
+          signals: input.routingSignals ?? [],
+          pipelineId: this.pipeline.id,
+          stageIds: this.pipeline.stages.map((stage) => stage.id),
+          ...(input.laneOverride === undefined ? {} : { override: input.laneOverride })
+        }),
       revision: 0,
       activeStageId: firstStage.id,
       stages,
@@ -206,6 +239,86 @@ export class AgentFlowEngine {
 
   loadRun(runId: string): Promise<RunState> {
     return this.store.load(runId);
+  }
+
+  escalateRunWorkflow(
+    runId: string,
+    signals: RoutingSignal[],
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "workflow.escalate", context, (state, now) => {
+      invariant(
+        context.actor.kind === "supervisor" || context.actor.kind === "system",
+        "Only a Supervisor or system actor can escalate workflow policy",
+        "WORKFLOW_ESCALATE_ACTOR_INVALID"
+      );
+      const previous = state.workflow;
+      const next = escalateWorkflow(previous, {
+        requirement: state.requirement,
+        projectType: state.projectType,
+        hasUi: state.hasUi,
+        signals,
+        pipelineId: this.pipeline.id,
+        stageIds: this.pipeline.stages.map((stage) => stage.id)
+      });
+      if (next.lane === previous.lane) return state;
+      const escalationSignals = next.signals.filter((signal) => !previous.signals.includes(signal));
+      state.workflow = {
+        ...next,
+        policySkippedStageIds: previous.policySkippedStageIds,
+        escalations: [...previous.escalations, {
+          from: previous.lane,
+          to: next.lane,
+          signals: escalationSignals,
+          at: now
+        }]
+      };
+      this.event(state, "workflow.escalated", context.actor, now, {
+        from: previous.lane,
+        to: next.lane,
+        signals: escalationSignals
+      });
+      this.restoreNewlyEligibleStages(state, previous.policySkippedStageIds, context.actor, now);
+      return state;
+    });
+  }
+
+  cancelRun(runId: string, reason: string, context: MutationContext): Promise<RunState> {
+    return this.mutate(runId, "run.cancel", context, (state, now) => {
+      this.assertRunTerminable(state);
+      this.terminalizeRun(state, "cancelled", "cancelled", reason, context.actor, now);
+      return state;
+    });
+  }
+
+  supersedeRun(
+    runId: string,
+    replacementRunId: string,
+    reason: string,
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "run.supersede", context, (state, now) => {
+      invariant(replacementRunId.length > 0 && replacementRunId !== state.id, "Replacement Run ID is invalid", "RUN_REPLACEMENT_INVALID");
+      this.assertRunTerminable(state);
+      this.terminalizeRun(state, "superseded", "superseded", reason, context.actor, now, { replacementRunId });
+      return state;
+    });
+  }
+
+  failRun(runId: string, reason: string, context: MutationContext): Promise<RunState> {
+    return this.mutate(runId, "run.fail", context, (state, now) => {
+      this.assertRunTerminable(state);
+      this.terminalizeRun(state, "failed", "failed", reason, context.actor, now);
+      return state;
+    });
+  }
+
+  blockRun(runId: string, reason: string, context: MutationContext): Promise<RunState> {
+    return this.mutate(runId, "run.block", context, (state, now) => {
+      this.assertRunTerminable(state);
+      this.terminalizeRun(state, "blocked", "blocked", reason, context.actor, now);
+      return state;
+    });
   }
 
   async inspectHumanGate(
@@ -546,8 +659,43 @@ export class AgentFlowEngine {
     context: MutationContext
   ): Promise<RunState> {
     return this.mutate(runId, "task.claim", context, (state, now) => {
-      this.claimTaskState(state, taskId, workerId, leaseSeconds, now);
+      const task = this.claimTaskState(state, taskId, workerId, leaseSeconds, now);
+      task.ownerKind = "worker";
       this.event(state, "task.claimed", context.actor, now, { taskId, workerId, leaseSeconds });
+      return state;
+    });
+  }
+
+  claimInlineTask(
+    runId: string,
+    input: ClaimInlineTaskInput,
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "task.claim.inline", context, (state, now) => {
+      invariant(context.actor.kind === "supervisor", "Only a Supervisor can claim an inline Task", "TASK_INLINE_ACTOR_INVALID");
+      invariant(isAbsolute(input.workspace.path), "Inline Task workspace path must be absolute", "TASK_WORKSPACE_PATH_INVALID", {
+        path: input.workspace.path
+      });
+      const workspace = TaskWorkspaceSchema.parse({ ...input.workspace, boundAt: now });
+      const task = state.tasks[input.taskId];
+      invariant(task, `Task not found: ${input.taskId}`, "TASK_NOT_FOUND");
+      invariant(!task.requiresWorktree || workspace.kind === "worktree", `Task requires an isolated worktree: ${task.id}`, "TASK_WORKTREE_REQUIRED");
+      if (task.planRepository && workspace.kind === "worktree") {
+        invariant(
+          workspace.baseRevision === task.planRepository.baseRevision && workspace.branch !== task.planRepository.branch,
+          `Task worktree does not match the approved repository baseline: ${task.id}`,
+          "TASK_WORKSPACE_BASE_MISMATCH"
+        );
+      }
+      const claimed = this.claimTaskState(state, input.taskId, context.actor.id, input.leaseSeconds, now);
+      claimed.ownerKind = "supervisor";
+      claimed.workspace = workspace;
+      this.event(state, "task.claimed.inline", context.actor, now, {
+        taskId: input.taskId,
+        leaseSeconds: input.leaseSeconds,
+        workspaceKind: workspace.kind,
+        workspacePath: workspace.path
+      });
       return state;
     });
   }
@@ -610,6 +758,7 @@ export class AgentFlowEngine {
       const claimed = alreadyClaimed
         ? task
         : this.claimTaskState(state, input.taskId, input.workerId, input.leaseSeconds, now);
+      claimed.ownerKind = "worker";
       claimed.workspace = workspace;
       this.prepareWorkerState(state, input, now);
       if (!alreadyClaimed) {
@@ -926,6 +1075,14 @@ export class AgentFlowEngine {
       this.assertWorkerChangeSet(task, result);
       worker.status = result.status;
       worker.result = result;
+      worker.cleanup = {
+        resultCollectedAt: now,
+        close: worker.capabilities.close
+          ? { status: "pending" }
+          : { status: "unsupported", reason: "Adapter has no native close capability" },
+        archive: { status: "pending" },
+        permitRelease: { status: "pending" }
+      };
       worker.updatedAt = now;
 
       if (result.status === "completed") {
@@ -969,6 +1126,7 @@ export class AgentFlowEngine {
       invariant(worker, `Worker not found: ${workerId}`, "WORKER_NOT_FOUND");
       invariant(isLiveWorker(worker.status), `Worker is already terminal: ${worker.status}`, "WORKER_TERMINAL");
       worker.status = "failed";
+      worker.cleanup ??= this.initialWorkerCleanup(worker.capabilities.close);
       worker.updatedAt = now;
       const task = state.tasks[worker.taskId];
       if (task?.status === "running" && task.owner === workerId) {
@@ -995,6 +1153,7 @@ export class AgentFlowEngine {
       invariant(isLiveWorker(worker.status), `Worker is already terminal: ${worker.status}`, "WORKER_TERMINAL");
       invariant(worker.capabilities.interrupt, "Worker adapter cannot interrupt native work", "WORKER_CAPABILITY_UNAVAILABLE");
       worker.status = "interrupted";
+      worker.cleanup ??= this.initialWorkerCleanup(worker.capabilities.close);
       worker.updatedAt = now;
       const task = state.tasks[worker.taskId];
       if (task?.status === "running" && task.owner === workerId) {
@@ -1025,8 +1184,47 @@ export class AgentFlowEngine {
       invariant(worker.status !== "closed", `Worker is already closed: ${workerId}`, "WORKER_ALREADY_CLOSED");
       invariant(worker.capabilities.close, "Worker adapter cannot close native work", "WORKER_CAPABILITY_UNAVAILABLE");
       worker.status = "closed";
+      worker.cleanup ??= this.initialWorkerCleanup(worker.capabilities.close);
+      worker.cleanup.close = { status: "completed", at: now };
       worker.updatedAt = now;
       this.event(state, "worker.closed", context.actor, now, { workerId, taskId: worker.taskId, reason });
+      return state;
+    });
+  }
+
+  recordWorkerCleanup(
+    runId: string,
+    input: RecordWorkerCleanupInput,
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "worker.cleanup.record", context, (state, now) => {
+      invariant(
+        context.actor.kind === "supervisor" || context.actor.kind === "system",
+        "Only a Supervisor or system actor can record Worker cleanup",
+        "WORKER_CLEANUP_ACTOR_INVALID"
+      );
+      const worker = state.workers[input.workerId];
+      invariant(worker, `Worker not found: ${input.workerId}`, "WORKER_NOT_FOUND");
+      invariant(!isLiveWorker(worker.status), `Worker must be terminal before cleanup: ${worker.status}`, "WORKER_NOT_TERMINAL");
+      invariant(worker.cleanup, `Worker has no collected cleanup state: ${worker.id}`, "WORKER_CLEANUP_MISSING");
+      worker.cleanup[input.step] = {
+        status: input.status,
+        at: now,
+        ...(input.reason === undefined ? {} : { reason: input.reason })
+      };
+      const terminalSteps = [worker.cleanup.close, worker.cleanup.archive, worker.cleanup.permitRelease];
+      if (terminalSteps.every((step) => step.status === "completed" || step.status === "unsupported")) {
+        worker.cleanup.completedAt = now;
+      } else {
+        delete worker.cleanup.completedAt;
+      }
+      worker.updatedAt = now;
+      this.event(state, "worker.cleanup.recorded", context.actor, now, {
+        workerId: worker.id,
+        taskId: worker.taskId,
+        step: input.step,
+        status: input.status
+      });
       return state;
     });
   }
@@ -1402,7 +1600,7 @@ export class AgentFlowEngine {
           .filter((artifact) => artifact.stageId === stageId && !artifact.stale)
           .map((artifact) => artifact.kind)
       );
-      for (const kind of stage.requiredArtifactKinds) {
+      for (const kind of requiredArtifactKindsForLane(state.workflow.lane, stageId, stage.requiredArtifactKinds)) {
         invariant(artifactKinds.has(kind), `Missing required artifact kind: ${kind}`, "STAGE_ARTIFACT_MISSING", { stageId, kind });
       }
       if (stage.requiredGate) {
@@ -1418,21 +1616,7 @@ export class AgentFlowEngine {
       delete stageRun.staleReason;
       this.event(state, "stage.completed", context.actor, now, { stageId });
 
-      const next = readyStages(this.pipeline, state)[0];
-      if (next) {
-        const nextRun = state.stages[next.id];
-        invariant(nextRun, `Missing stage state: ${next.id}`, "STAGE_STATE_MISSING");
-        nextRun.status = "active";
-        nextRun.startedAt = now;
-        delete nextRun.staleReason;
-        state.activeStageId = next.id;
-        this.readyTasksForStage(state, next.id, now);
-        this.event(state, "stage.started", context.actor, now, { stageId: next.id });
-      } else {
-        state.status = "completed";
-        delete state.activeStageId;
-        this.event(state, "run.completed", context.actor, now, {});
-      }
+      this.advanceRun(state, context.actor, now);
       return state;
     });
   }
@@ -1450,16 +1634,189 @@ export class AgentFlowEngine {
       stageRun.status = "skipped";
       stageRun.completedAt = now;
       this.event(state, "stage.skipped", context.actor, now, { stageId, reason });
-      const next = readyStages(this.pipeline, state)[0];
-      invariant(next, `No stage became ready after skipping ${stageId}`, "NO_READY_STAGE");
-      const nextRun = state.stages[next.id];
-      invariant(nextRun, `Missing stage state: ${next.id}`, "STAGE_STATE_MISSING");
-      nextRun.status = "active";
-      nextRun.startedAt = now;
-      state.activeStageId = next.id;
-      this.readyTasksForStage(state, next.id, now);
+      this.advanceRun(state, context.actor, now);
       return state;
     });
+  }
+
+  private advanceRun(state: RunState, actor: Actor, now: string): void {
+    while (true) {
+      const next = readyStages(this.pipeline, state)[0];
+      if (!next) {
+        invariant(
+          this.pipeline.stages.every((stage) => ["completed", "skipped"].includes(state.stages[stage.id]?.status ?? "")),
+          "No Stage is ready but the Run still has unfinished Stages",
+          "NO_READY_STAGE"
+        );
+        this.assertRunTerminable(state);
+        this.terminalizeRun(state, "completed", "succeeded", "All eligible Stages completed", actor, now);
+        return;
+      }
+
+      const nextRun = state.stages[next.id];
+      invariant(nextRun, `Missing stage state: ${next.id}`, "STAGE_STATE_MISSING");
+      if (!state.workflow.eligibleStageIds.includes(next.id)) {
+        nextRun.status = "skipped";
+        nextRun.startedAt ??= now;
+        nextRun.completedAt = now;
+        delete nextRun.staleReason;
+        if (!state.workflow.policySkippedStageIds.includes(next.id)) {
+          state.workflow.policySkippedStageIds.push(next.id);
+        }
+        for (const task of Object.values(state.tasks)) {
+          if (task.stageId !== next.id || !["pending", "ready"].includes(task.status)) continue;
+          task.status = "cancelled";
+          task.updatedAt = now;
+        }
+        this.event(state, "stage.skipped", actor, now, {
+          stageId: next.id,
+          reason: "workflow-policy",
+          lane: state.workflow.lane,
+          policyVersion: state.workflow.policyVersion
+        });
+        continue;
+      }
+
+      nextRun.status = "active";
+      nextRun.startedAt = now;
+      delete nextRun.completedAt;
+      delete nextRun.staleReason;
+      state.activeStageId = next.id;
+      this.readyTasksForStage(state, next.id, now);
+      this.event(state, "stage.started", actor, now, { stageId: next.id });
+      return;
+    }
+  }
+
+  private restoreNewlyEligibleStages(
+    state: RunState,
+    previouslySkippedStageIds: string[],
+    actor: Actor,
+    now: string
+  ): void {
+    const newlyEligible = previouslySkippedStageIds.filter((stageId) => state.workflow.eligibleStageIds.includes(stageId));
+    if (newlyEligible.length === 0) return;
+    const indexes = new Map(this.pipeline.stages.map((stage, index) => [stage.id, index]));
+    const earliestIndex = Math.min(...newlyEligible.map((stageId) => indexes.get(stageId) ?? Number.MAX_SAFE_INTEGER));
+    const affectedStageIds = new Set(this.pipeline.stages.slice(earliestIndex).map((stage) => stage.id));
+    const materialArtifact = Object.values(state.artifacts)
+      .find((artifact) => affectedStageIds.has(artifact.stageId) && !artifact.stale);
+    const materialTask = Object.values(state.tasks)
+      .find((task) => affectedStageIds.has(task.stageId) && ["running", "completed", "failed", "blocked"].includes(task.status));
+    const materialGate = Object.values(state.gates)
+      .find((gate) => affectedStageIds.has(gate.stageId) && gate.status !== "pending");
+    const materialStage = this.pipeline.stages
+      .find((stage) => affectedStageIds.has(stage.id) && state.stages[stage.id]?.status === "completed");
+    const activeResource = Object.values(state.resources)
+      .find((resource) => affectedStageIds.has(resource.stageId) && resource.status === "active");
+    invariant(
+      !materialArtifact && !materialTask && !materialGate && !materialStage && !activeResource,
+      "Workflow escalation discovered material downstream work and requires explicit replanning",
+      "WORKFLOW_ESCALATION_REPLAN_REQUIRED",
+      {
+        artifactId: materialArtifact?.id,
+        taskId: materialTask?.id,
+        gateId: materialGate?.id,
+        stageId: materialStage?.id,
+        resourceId: activeResource?.id
+      }
+    );
+
+    const activeStageId = state.activeStageId;
+    if (activeStageId && affectedStageIds.has(activeStageId)) {
+      const activeStage = state.stages[activeStageId];
+      if (activeStage?.status === "active") {
+        activeStage.status = "pending";
+        delete activeStage.startedAt;
+      }
+      for (const task of Object.values(state.tasks)) {
+        if (task.stageId === activeStageId && task.status === "ready") {
+          task.status = "pending";
+          task.updatedAt = now;
+        }
+      }
+      delete state.activeStageId;
+    }
+    for (const stageId of newlyEligible) {
+      const stage = state.stages[stageId];
+      if (!stage) continue;
+      stage.status = "pending";
+      delete stage.startedAt;
+      delete stage.completedAt;
+      delete stage.staleReason;
+      for (const task of Object.values(state.tasks)) {
+        if (task.stageId === stageId && task.status === "cancelled") {
+          task.status = "pending";
+          task.updatedAt = now;
+        }
+      }
+    }
+    state.workflow.policySkippedStageIds = state.workflow.policySkippedStageIds
+      .filter((stageId) => !newlyEligible.includes(stageId));
+    this.event(state, "workflow.stages-restored", actor, now, { stageIds: newlyEligible });
+    this.advanceRun(state, actor, now);
+  }
+
+  private assertRunTerminable(state: RunState): void {
+    invariant(state.executionStatus !== "terminal", `Run is already terminal: ${state.id}`, "RUN_TERMINAL");
+    const liveWorker = Object.values(state.workers).find((worker) => isLiveWorker(worker.status));
+    invariant(!liveWorker, `Run still has a live Worker: ${liveWorker?.id}`, "RUN_WORKER_LIVE", {
+      workerId: liveWorker?.id,
+      taskId: liveWorker?.taskId,
+      status: liveWorker?.status
+    });
+    const runningTask = Object.values(state.tasks).find((task) => task.status === "running");
+    invariant(!runningTask, `Run still has a running Task: ${runningTask?.id}`, "RUN_TASK_LIVE", {
+      taskId: runningTask?.id,
+      owner: runningTask?.owner,
+      ownerKind: runningTask?.ownerKind
+    });
+    const activeOperation = Object.values(state.resources).find((resource) => resource.activeOperationId !== undefined);
+    invariant(!activeOperation, `Run still has an external operation: ${activeOperation?.activeOperationId}`, "RUN_RESOURCE_OPERATION_LIVE", {
+      resourceId: activeOperation?.id,
+      operationId: activeOperation?.activeOperationId
+    });
+    const activeResource = Object.values(state.resources).find((resource) => resource.status === "active");
+    invariant(!activeResource, `Run still has an active resource: ${activeResource?.id}`, "RUN_RESOURCE_ACTIVE", {
+      resourceId: activeResource?.id,
+      owner: activeResource?.owner
+    });
+    const cleanupWorkerIds = pendingTerminalCleanup(state);
+    invariant(cleanupWorkerIds.length === 0, "Run still has pending terminal Worker cleanup", "RUN_CLEANUP_PENDING", {
+      workerIds: cleanupWorkerIds
+    });
+  }
+
+  private terminalizeRun(
+    state: RunState,
+    status: Exclude<RunState["status"], "active">,
+    outcome: NonNullable<RunState["businessOutcome"]>,
+    reason: string,
+    actor: Actor,
+    now: string,
+    data: Record<string, unknown> = {}
+  ): void {
+    state.status = status;
+    state.executionStatus = "terminal";
+    state.businessOutcome = outcome;
+    delete state.activeStageId;
+    for (const task of Object.values(state.tasks)) {
+      if (!["pending", "ready"].includes(task.status)) continue;
+      task.status = "cancelled";
+      delete task.lease;
+      task.updatedAt = now;
+    }
+    this.event(state, `run.${status}`, actor, now, { reason, ...data });
+  }
+
+  private initialWorkerCleanup(closeSupported: boolean): NonNullable<RunState["workers"][string]["cleanup"]> {
+    return {
+      close: closeSupported
+        ? { status: "pending" }
+        : { status: "unsupported", reason: "Adapter has no native close capability" },
+      archive: { status: "pending" },
+      permitRelease: { status: "pending" }
+    };
   }
 
   private mutate(
@@ -1549,6 +1906,8 @@ export class AgentFlowEngine {
       state.activeStageId = artifact.stageId;
     }
     state.status = "active";
+    state.executionStatus = "running";
+    delete state.businessOutcome;
     this.event(state, "artifact.invalidated-downstream", { id: "system", kind: "system" }, now, {
       artifactId,
       previousHash,
@@ -1807,6 +2166,19 @@ export class AgentFlowEngine {
 
 function isLiveWorker(status: WorkerStatus): boolean {
   return ["prepared", "starting", "running", "unknown"].includes(status);
+}
+
+export function pendingTerminalCleanup(state: Pick<RunState, "workers">): string[] {
+  return Object.values(state.workers)
+    .filter((worker) => !isLiveWorker(worker.status) && worker.cleanup !== undefined)
+    .filter((worker) => {
+      const cleanup = worker.cleanup;
+      if (!cleanup || cleanup.completedAt !== undefined) return false;
+      return [cleanup.close, cleanup.archive, cleanup.permitRelease]
+        .some((step) => step.status === "pending" || step.status === "failed");
+    })
+    .map((worker) => worker.id)
+    .sort();
 }
 
 function normalizeScope(scope: string): string {

@@ -1,4 +1,5 @@
 import { RunStateSchema, type RunState, type WorkerStatus } from "./model.js";
+import { legacyFullWorkflow } from "./workflow-policy.js";
 
 const LIVE_WORKER_STATUSES = new Set<WorkerStatus>(["prepared", "starting", "running", "unknown"]);
 
@@ -12,6 +13,7 @@ export function migrateRunState(input: unknown): RunState {
     if (status === "completed") source.businessOutcome = "succeeded";
     if (status === "cancelled") source.businessOutcome = "cancelled";
   }
+  source.workflow ??= legacyFullWorkflow(Object.keys(isRecord(source.stages) ? source.stages : {}));
 
   const workers = isRecord(source.workers) ? source.workers : {};
   for (const value of Object.values(workers)) {

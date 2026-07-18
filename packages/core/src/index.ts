@@ -7,3 +7,4 @@ export * from "./model.js";
 export * from "./pipeline.js";
 export * from "./projections.js";
 export * from "./store.js";
+export * from "./workflow-policy.js";

@@ -36,9 +36,26 @@ export const TaskStatusSchema = z.enum([
   "cancelled"
 ]);
 
-export const RunStatusSchema = z.enum(["active", "blocked", "completed", "cancelled"]);
+export const RunStatusSchema = z.enum(["active", "blocked", "completed", "cancelled", "failed", "superseded"]);
 export const ExecutionStatusSchema = z.enum(["running", "terminal"]);
 export const BusinessOutcomeSchema = z.enum(["succeeded", "failed", "blocked", "cancelled", "superseded"]);
+export const WorkflowLaneSchema = z.enum(["quick", "standard", "full"]);
+export const RoutingSignalSchema = z.enum([
+  "low-risk",
+  "standard-scope",
+  "new-project",
+  "release",
+  "deployment",
+  "migration",
+  "destructive-git",
+  "security-sensitive",
+  "ui",
+  "cross-module-contract",
+  "publication",
+  "full-override",
+  "legacy-full",
+  "unsupported-pipeline"
+]);
 export const GateStatusSchema = z.enum(["pending", "approved", "rejected", "stale"]);
 export const GateTypeSchema = z.enum(["human", "automatic"]);
 export const ActorKindSchema = z.enum(["user", "supervisor", "worker", "system"]);
@@ -87,6 +104,23 @@ export const WorkerCleanupSchema = z.object({
 export const ResourceStatusSchema = z.enum(["active", "released"]);
 export const ResourceOperationStatusSchema = z.enum(["running", "completed", "failed"]);
 export const StagePreflightStatusSchema = z.enum(["passed", "blocked"]);
+
+export const WorkflowEscalationSchema = z.object({
+  from: WorkflowLaneSchema,
+  to: WorkflowLaneSchema,
+  signals: z.array(RoutingSignalSchema).min(1),
+  at: IsoDateSchema
+}).strict();
+
+export const WorkflowStateSchema = z.object({
+  policyVersion: z.string().min(1),
+  lane: WorkflowLaneSchema,
+  signals: z.array(RoutingSignalSchema).min(1),
+  explanation: z.string().min(1).max(4_000),
+  eligibleStageIds: z.array(IdSchema).min(1),
+  policySkippedStageIds: z.array(IdSchema).default([]),
+  escalations: z.array(WorkflowEscalationSchema).default([])
+}).strict();
 
 export const RequiredGateSchema = z.object({
   id: IdSchema,
@@ -336,7 +370,7 @@ export const IdempotencyRecordSchema = z.object({
   recordedAt: IsoDateSchema
 });
 
-export const RunStateSchema = z.object({
+const RunStateObjectSchema = z.object({
   schemaVersion: z.literal(2).default(2),
   id: IdSchema,
   pipelineId: IdSchema,
@@ -347,6 +381,7 @@ export const RunStateSchema = z.object({
   status: RunStatusSchema,
   executionStatus: ExecutionStatusSchema.default("running"),
   businessOutcome: BusinessOutcomeSchema.optional(),
+  workflow: WorkflowStateSchema,
   revision: z.number().int().nonnegative(),
   activeStageId: IdSchema.optional(),
   stages: z.record(IdSchema, StageRunSchema),
@@ -361,6 +396,24 @@ export const RunStateSchema = z.object({
   createdAt: IsoDateSchema,
   updatedAt: IsoDateSchema
 });
+
+export const RunStateSchema = z.preprocess((input) => {
+  if (!isRecord(input) || input.workflow !== undefined) return input;
+  const stages = isRecord(input.stages) ? input.stages : {};
+  const eligibleStageIds = Object.keys(stages);
+  return {
+    ...input,
+    workflow: {
+      policyVersion: "legacy-0.4.0",
+      lane: "full",
+      signals: ["legacy-full"],
+      explanation: "Existing callers and migrated Runs retain the complete legacy pipeline.",
+      eligibleStageIds: eligibleStageIds.length > 0 ? eligibleStageIds : ["S00"],
+      policySkippedStageIds: [],
+      escalations: []
+    }
+  };
+}, RunStateObjectSchema);
 
 export type ActorKind = z.infer<typeof ActorKindSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
@@ -387,6 +440,9 @@ export type WorkerContextPolicy = z.infer<typeof WorkerContextPolicySchema>;
 export type WorkerChangeSet = z.infer<typeof WorkerChangeSetSchema>;
 export type WorkerResult = z.infer<typeof WorkerResultSchema>;
 export type WorkerStatus = z.infer<typeof WorkerStatusSchema>;
+export type RoutingSignal = z.infer<typeof RoutingSignalSchema>;
+export type WorkflowLane = z.infer<typeof WorkflowLaneSchema>;
+export type WorkflowState = z.infer<typeof WorkflowStateSchema>;
 
 export interface Actor {
   id: string;
@@ -399,4 +455,8 @@ export interface MutationContext {
   inputHash?: string;
   actor: Actor;
   reason?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
