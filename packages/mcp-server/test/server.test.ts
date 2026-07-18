@@ -82,7 +82,7 @@ describe("AgentFlow MCP server", () => {
     });
     await writeFile(paths.currentRunPath, `${JSON.stringify({ runId: "run-contract" }, null, 2)}\n`, "utf8");
 
-    server = createAgentFlowMcpServer({ projectRoot: directory });
+    server = createAgentFlowMcpServer({ projectRoot: directory, defaultResponseProfile: "full" });
     client = new Client({ name: "agentflow-test", version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -125,7 +125,11 @@ describe("AgentFlow MCP server", () => {
       "resource_rekey",
       "resource_release",
       "resource_status",
+      "run_block",
+      "run_cancel",
+      "run_fail",
       "run_start_or_resume",
+      "run_supersede",
       "stage_complete",
       "stage_preflight_report",
       "stage_skip",
@@ -300,7 +304,7 @@ describe("AgentFlow MCP server", () => {
         { uri: pathToFileURL(rootB).href }
       ]
     });
-    server = createAgentFlowMcpServer({ projectRootResolver: resolver });
+    server = createAgentFlowMcpServer({ projectRootResolver: resolver, defaultResponseProfile: "full" });
     client = new Client({ name: "agentflow-dynamic-test", version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -327,7 +331,7 @@ describe("AgentFlow MCP server", () => {
 
     await client.close();
     await server.close();
-    server = createAgentFlowMcpServer({ projectRoot: rootA, projectRootResolver: resolver });
+    server = createAgentFlowMcpServer({ projectRoot: rootA, projectRootResolver: resolver, defaultResponseProfile: "full" });
     client = new Client({ name: "agentflow-fixed-test", version: "0.1.0" });
     const [fixedClientTransport, fixedServerTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(fixedServerTransport);
@@ -344,7 +348,7 @@ describe("AgentFlow MCP server", () => {
 
     const freshRoot = join(directory, "fresh-project");
     await mkdir(freshRoot, { recursive: true });
-    server = createAgentFlowMcpServer({ projectRoot: freshRoot });
+    server = createAgentFlowMcpServer({ projectRoot: freshRoot, defaultResponseProfile: "full" });
     client = new Client({ name: "agentflow-lifecycle-test", version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -370,11 +374,25 @@ describe("AgentFlow MCP server", () => {
       state: { id: "lazy-mcp-run" }
     });
 
-    const resumed = await call(connectedClient, "run_start_or_resume", {
+    const conflict = await call(connectedClient, "run_start_or_resume", {
       requirement: "Continue the existing lazy project",
       projectType: "existing",
       hasUi: false,
       requestKey: "lazy-request-2"
+    });
+    expect(conflict.structuredContent).toMatchObject({
+      action: "conflict",
+      initialized: false,
+      conflict: { code: "ACTIVE_RUN_INTENT_CONFLICT", activeRunId: "lazy-mcp-run" }
+    });
+    expect(conflict.structuredContent).not.toHaveProperty("state");
+
+    const resumed = await call(connectedClient, "run_start_or_resume", {
+      requirement: "Continue the existing lazy project",
+      projectType: "existing",
+      hasUi: false,
+      requestedRunId: "lazy-mcp-run",
+      requestKey: "lazy-request-3"
     });
     expect(resumed.structuredContent).toMatchObject({
       action: "resumed",
@@ -386,6 +404,7 @@ describe("AgentFlow MCP server", () => {
     const statePath = join(paths.runsDirectory, "lazy-mcp-run", "state.json");
     const completed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
     completed["status"] = "completed";
+    completed["executionStatus"] = "terminal";
     delete completed["activeStageId"];
     await writeFile(statePath, `${JSON.stringify(completed, null, 2)}\n`, "utf8");
 
@@ -394,7 +413,7 @@ describe("AgentFlow MCP server", () => {
       projectType: "existing",
       hasUi: false,
       requestedRunId: "next-mcp-run",
-      requestKey: "lazy-request-3"
+      requestKey: "lazy-request-4"
     });
     expect(next.structuredContent).toMatchObject({
       action: "started",
@@ -870,6 +889,12 @@ describe("AgentFlow MCP server", () => {
       ...mutation(3, "native-bind", "supervisor-1")
     });
     expect(runState(result).workers["native-worker"]?.externalThreadId).toBe("codex-native-thread");
+
+    const unsafeCancellation = await call(connectedClient, "run_cancel", {
+      ...mutation(4, "cancel-live-native-worker", "supervisor-1")
+    });
+    expect(unsafeCancellation.isError).toBe(true);
+    expect(unsafeCancellation.structuredContent).toMatchObject({ error: "RUN_WORKER_LIVE" });
 
     const persisted = await call(connectedClient, "worker_status", { workerId: "native-worker" });
     expect(persisted.structuredContent).toMatchObject({

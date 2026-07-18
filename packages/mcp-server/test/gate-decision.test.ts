@@ -426,7 +426,7 @@ describe("gate_decision_request", () => {
     capabilities: Record<string, unknown>,
     handler: ((request: ElicitRequest) => Promise<unknown>) | undefined
   ): Promise<void> {
-    server = createAgentFlowMcpServer({ projectRoot: directory });
+    server = createAgentFlowMcpServer({ projectRoot: directory, defaultResponseProfile: "full" });
     client = new Client(
       { name: "gate-decision-test", version: "1.0.0" },
       { capabilities }

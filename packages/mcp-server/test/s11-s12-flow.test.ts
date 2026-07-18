@@ -124,7 +124,7 @@ describe("S11 to S12 real Git flow", () => {
     }, mutationContext(state, "register-architecture", "architect"));
     await writeFile(paths.currentRunPath, `${JSON.stringify({ runId: state.id }, null, 2)}\n`, "utf8");
 
-    server = createAgentFlowMcpServer({ projectRoot: directory });
+    server = createAgentFlowMcpServer({ projectRoot: directory, defaultResponseProfile: "full" });
     client = new Client({ name: "s11-s12-test", version: "0.1.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);

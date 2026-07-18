@@ -127,8 +127,16 @@ describe("project lifecycle", () => {
       startOrResumeRun(paths, { ...request, requestKey: "concurrent-b", requestedRunId: "run-b" })
     ]);
 
-    expect(new Set([first.state.id, second.state.id]).size).toBe(1);
-    expect([first.action, second.action].sort()).toEqual(["resumed", "started"]);
+    const started = [first, second].find((result) => result.action === "started");
+    const conflict = [first, second].find((result) => result.action === "conflict");
+    expect(started).toMatchObject({ action: "started" });
+    expect(conflict).toMatchObject({
+      action: "conflict",
+      conflict: {
+        code: "REQUESTED_RUN_NOT_FOUND",
+        activeRunId: started?.action === "started" ? started.state.id : undefined
+      }
+    });
     const runDirectories = await readdir(paths.runsDirectory, { withFileTypes: true });
     expect(runDirectories.filter((entry) => entry.isDirectory()).map((entry) => entry.name)).toHaveLength(1);
   });
@@ -153,13 +161,14 @@ describe("project lifecycle", () => {
       ...request,
       requirement: "Continue with another changing request",
       requestKey: "request-2",
-      requestedRunId: "ignored-while-active"
+      requestedRunId: first.state.id
     });
     expect(resumed).toMatchObject({ action: "resumed", state: { id: first.state.id } });
 
     const statePath = join(paths.runsDirectory, first.state.id, "state.json");
     const completed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
     completed["status"] = "completed";
+    completed["executionStatus"] = "terminal";
     delete completed["activeStageId"];
     await writeFile(statePath, `${JSON.stringify(completed, null, 2)}\n`, "utf8");
 
@@ -259,7 +268,15 @@ describe("project lifecycle", () => {
       }, dependencies)
     ]);
 
-    expect(left.state.id).toBe(right.state.id);
+    const started = [left, right].find((result) => result.action === "started");
+    const conflict = [left, right].find((result) => result.action === "conflict");
+    expect(conflict).toMatchObject({
+      action: "conflict",
+      conflict: {
+        code: "REQUESTED_RUN_NOT_FOUND",
+        activeRunId: started?.action === "started" ? started.state.id : undefined
+      }
+    });
     const runDirectories = await readdir(paths.runsDirectory, { withFileTypes: true });
     expect(runDirectories.filter((entry) => entry.isDirectory())).toHaveLength(1);
   });

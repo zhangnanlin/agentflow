@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   lstat,
+  link,
   mkdir,
   open,
   readFile,
@@ -30,6 +31,7 @@ const IGNORE_BODY = [
   "runs/",
   "current-run.json",
   ".start.lock",
+  ".start.lock.retired-*",
   ".start.pending.json",
   "start-requests/",
   "*.tmp"
@@ -90,6 +92,25 @@ export interface StartOrResumeRunResult {
   state: RunState;
 }
 
+export interface StartOrResumeRunConflict {
+  action: "conflict";
+  projectRoot: string;
+  initialized: boolean;
+  conflict: {
+    code: "ACTIVE_RUN_INTENT_CONFLICT" | "REQUESTED_RUN_NOT_FOUND";
+    activeRunId: string;
+    actions: Array<
+      | { action: "resume"; requestedRunId: string }
+      | { action: "cancel"; tool: "run_cancel"; runId: string }
+      | { action: "supersede"; tool: "run_supersede"; runId: string }
+      | { action: "wait"; runId: string }
+      | { action: "reconcile"; runId: string }
+    >;
+  };
+}
+
+export type StartOrResumeRunOutcome = StartOrResumeRunResult | StartOrResumeRunConflict;
+
 export type ProjectLifecycleCheckpoint =
   | "after-journal"
   | "after-run-created"
@@ -131,16 +152,18 @@ export async function startOrResumeRun(
   paths: ProjectPaths,
   rawInput: StartOrResumeRunInput,
   dependencies: ProjectLifecycleDependencies = {}
-): Promise<StartOrResumeRunResult> {
+): Promise<StartOrResumeRunOutcome> {
   const input = parseStartRequest(rawInput);
   await assertControlTreeUnlinked(paths);
   await mkdir(paths.agentflowDirectory, { recursive: true });
   await assertControlTreeUnlinked(paths);
   const lockToken = await acquireStartLock(paths, dependencies);
+  const stopHeartbeat = startLockHeartbeat(paths, lockToken, dependencies.staleLockMs ?? 30_000);
   try {
     await assertControlTreeUnlinked(paths);
     return await startOrResumeLocked(paths, input, dependencies);
   } finally {
+    await stopHeartbeat();
     await releaseStartLock(paths, lockToken);
   }
 }
@@ -149,7 +172,7 @@ async function startOrResumeLocked(
   paths: ProjectPaths,
   input: z.infer<typeof StartRequestSchema>,
   dependencies: ProjectLifecycleDependencies
-): Promise<StartOrResumeRunResult> {
+): Promise<StartOrResumeRunOutcome> {
   const immutable = immutableInput(input);
   const keyHash = sha256(input.requestKey);
   const inputHash = sha256(canonicalJson(immutable));
@@ -182,7 +205,29 @@ async function startOrResumeLocked(
   const initialized = await initializeControlFiles(paths);
   const engine = await createEngine(paths);
   const current = await loadCurrentRun(paths, engine);
-  if (current !== undefined && (current.status === "active" || current.status === "blocked")) {
+  if (input.requestedRunId !== undefined) {
+    const requested = await loadOptionalRun(engine, input.requestedRunId);
+    if (requested !== undefined) {
+      return persistOperation(
+        paths,
+        engine,
+        input,
+        keyHash,
+        inputHash,
+        requested.id,
+        "resumed",
+        initialized,
+        dependencies
+      );
+    }
+    if (current !== undefined && isRunUnfinished(current)) {
+      return intentConflict(paths, initialized, current.id, "REQUESTED_RUN_NOT_FOUND");
+    }
+  }
+  if (current !== undefined && isRunUnfinished(current)) {
+    if (!sameNormalizedIntent(current, input)) {
+      return intentConflict(paths, initialized, current.id, "ACTIVE_RUN_INTENT_CONFLICT");
+    }
     return persistOperation(paths, engine, input, keyHash, inputHash, current.id, "resumed", initialized, dependencies);
   }
 
@@ -228,6 +273,10 @@ async function persistOperation(
     await checkpoint(dependencies, "after-current-pointer");
   } else {
     state = await engine.loadRun(runId);
+    if (input.requestedRunId !== undefined) {
+      await atomicWrite(paths.currentRunPath, { runId });
+      await checkpoint(dependencies, "after-current-pointer");
+    }
   }
 
   await checkpoint(dependencies, "before-request-record");
@@ -246,7 +295,8 @@ async function recoverPendingJournal(paths: ProjectPaths, pending: PendingJourna
 
   const engine = await createEngine(paths);
   const pointer = await readCurrentPointer(paths);
-  if (pointer !== undefined && pointer !== pending.runId) {
+  const explicitlySelectedPendingRun = pending.request.requestedRunId === pending.runId;
+  if (pointer !== undefined && pointer !== pending.runId && !explicitlySelectedPendingRun) {
     throw journalError(paths, "Pending Run conflicts with current-run.json", {
       pendingRunId: pending.runId,
       currentRunId: pointer
@@ -278,7 +328,9 @@ async function recoverPendingJournal(paths: ProjectPaths, pending: PendingJourna
     });
   }
 
-  if (pointer === undefined) await atomicWrite(paths.currentRunPath, { runId: pending.runId });
+  if (pointer === undefined || explicitlySelectedPendingRun) {
+    await atomicWrite(paths.currentRunPath, { runId: pending.runId });
+  }
   if (existingRecord === undefined) await atomicWrite(recordPath, completedRecord(pending));
   await rm(paths.startPendingPath, { force: true });
 }
@@ -346,24 +398,25 @@ async function acquireStartLock(
       }
       return token;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        const lockStat = await lstat(paths.startLockPath);
-        if (lockStat.isSymbolicLink()) throw linkedControlPathError(paths, paths.startLockPath);
-        if (Date.now() - lockStat.mtimeMs > staleLockMs) {
-          await rm(paths.startLockPath, { force: true });
-          continue;
-        }
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw statError;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        if (!isTransientLockContentionCode(code)) throw error;
+        if (Date.now() >= deadline) throw startLockTimeout(paths);
+        await delay(lockRetryMs);
+        continue;
       }
+      let evidence: StartLockEvidence | undefined;
+      try {
+        evidence = await readStartLockEvidence(paths);
+      } catch (evidenceError) {
+        if (!isTransientLockContentionCode((evidenceError as NodeJS.ErrnoException).code)) throw evidenceError;
+        await delay(lockRetryMs);
+        continue;
+      }
+      if (evidence === undefined) continue;
+      if (Date.now() - evidence.mtimeMs > staleLockMs && await retireStartLock(paths, evidence)) continue;
       if (Date.now() >= deadline) {
-        throw new AgentFlowError(
-          "Timed out waiting for the AgentFlow project start lock",
-          "PROJECT_START_LOCK_TIMEOUT",
-          { projectRoot: paths.projectRoot, lockPath: paths.startLockPath }
-        );
+        throw startLockTimeout(paths);
       }
       await delay(lockRetryMs);
     }
@@ -371,22 +424,160 @@ async function acquireStartLock(
 }
 
 async function releaseStartLock(paths: ProjectPaths, token: string): Promise<void> {
+  const evidence = await readStartLockEvidence(paths);
+  if (evidence === undefined) return;
   try {
-    const lockStats = await lstat(paths.startLockPath);
-    if (lockStats.isSymbolicLink()) throw linkedControlPathError(paths, paths.startLockPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  const source = await readOptional(paths.startLockPath);
-  if (source === undefined) return;
-  try {
-    if (LockSchema.parse(JSON.parse(source)).token === token) {
-      await rm(paths.startLockPath, { force: true });
-    }
+    if (LockSchema.parse(JSON.parse(evidence.source)).token === token) await retireStartLock(paths, evidence);
   } catch {
     // A changed lock no longer belongs to this invocation and must be preserved.
   }
+}
+
+interface StartLockEvidence {
+  identity: string;
+  source: string;
+  mtimeMs: number;
+}
+
+async function readStartLockEvidence(paths: ProjectPaths): Promise<StartLockEvidence | undefined> {
+  try {
+    const stats = await lstat(paths.startLockPath);
+    if (stats.isSymbolicLink()) throw linkedControlPathError(paths, paths.startLockPath);
+    const source = await readFile(paths.startLockPath, "utf8");
+    return {
+      identity: sha256(canonicalJson({
+        source,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      })),
+      source,
+      mtimeMs: stats.mtimeMs
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function retireStartLock(paths: ProjectPaths, evidence: StartLockEvidence): Promise<boolean> {
+  const retiredPath = resolve(paths.agentflowDirectory, `.start.lock.retired-${evidence.identity}`);
+  try {
+    await link(paths.startLockPath, retiredPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EEXIST" || isTransientLockContentionCode(code)) return false;
+    throw error;
+  }
+
+  const retiredEvidence = await readLockEvidenceAtPath(paths, retiredPath);
+  if (retiredEvidence?.identity !== evidence.identity) {
+    await rm(retiredPath, { force: true });
+    return false;
+  }
+
+  try {
+    await rm(paths.startLockPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    if (isTransientLockContentionCode(code)) {
+      await rm(retiredPath, { force: true });
+      return false;
+    }
+    throw error;
+  } finally {
+    await pruneRetiredStartLocks(paths);
+  }
+  return true;
+}
+
+function startLockTimeout(paths: ProjectPaths): AgentFlowError {
+  return new AgentFlowError(
+    "Timed out waiting for the AgentFlow project start lock",
+    "PROJECT_START_LOCK_TIMEOUT",
+    { projectRoot: paths.projectRoot, lockPath: paths.startLockPath }
+  );
+}
+
+function isTransientLockContentionCode(code: string | undefined): boolean {
+  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+async function readLockEvidenceAtPath(
+  paths: ProjectPaths,
+  path: string
+): Promise<StartLockEvidence | undefined> {
+  try {
+    const stats = await lstat(path);
+    if (stats.isSymbolicLink()) throw linkedControlPathError(paths, path);
+    const source = await readFile(path, "utf8");
+    return {
+      identity: sha256(canonicalJson({
+        source,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      })),
+      source,
+      mtimeMs: stats.mtimeMs
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function startLockHeartbeat(
+  paths: ProjectPaths,
+  token: string,
+  staleLockMs: number
+): () => Promise<void> {
+  const intervalMs = Math.max(5, Math.min(1_000, Math.floor(staleLockMs / 3)));
+  let pending = Promise.resolve();
+  const timer = setInterval(() => {
+    pending = pending.then(() => heartbeatStartLock(paths, token)).catch(() => undefined);
+  }, intervalMs);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    await pending;
+  };
+}
+
+async function heartbeatStartLock(paths: ProjectPaths, token: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(paths.startLockPath, "r+");
+    const source = await handle.readFile({ encoding: "utf8" });
+    if (LockSchema.parse(JSON.parse(source)).token !== token) return;
+    const now = new Date();
+    await handle.utimes(now, now);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      // Heartbeats are advisory. Ownership is verified again before release.
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function pruneRetiredStartLocks(paths: ProjectPaths): Promise<void> {
+  const names = (await readdir(paths.agentflowDirectory))
+    .filter((name) => name.startsWith(".start.lock.retired-"));
+  if (names.length <= 128) return;
+  const candidates = await Promise.all(names.map(async (name) => {
+    const path = resolve(paths.agentflowDirectory, name);
+    try {
+      return { path, mtimeMs: (await lstat(path)).mtimeMs };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }));
+  const oldest = candidates
+    .filter((candidate): candidate is { path: string; mtimeMs: number } => candidate !== undefined)
+    .sort((left, right) => left.mtimeMs - right.mtimeMs)
+    .slice(0, Math.max(0, candidates.length - 128));
+  await Promise.all(oldest.map((candidate) => rm(candidate.path, { force: true })));
 }
 
 async function assertControlTreeUnlinked(paths: ProjectPaths): Promise<void> {
@@ -431,6 +622,52 @@ function linkedControlPathError(paths: ProjectPaths, path: string): AgentFlowErr
     "PROJECT_CONTROL_PATH_LINKED",
     { projectRoot: paths.projectRoot, path }
   );
+}
+
+function sameNormalizedIntent(state: RunState, input: ImmutableInput): boolean {
+  return normalizeRequirement(state.requirement) === normalizeRequirement(input.requirement)
+    && state.hasUi === input.hasUi;
+}
+
+function normalizeRequirement(requirement: string): string {
+  return requirement.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function isRunUnfinished(state: RunState): boolean {
+  return state.executionStatus === "running";
+}
+
+function intentConflict(
+  paths: ProjectPaths,
+  initialized: boolean,
+  activeRunId: string,
+  code: StartOrResumeRunConflict["conflict"]["code"]
+): StartOrResumeRunConflict {
+  return {
+    action: "conflict",
+    projectRoot: paths.projectRoot,
+    initialized,
+    conflict: {
+      code,
+      activeRunId,
+      actions: [
+        { action: "resume", requestedRunId: activeRunId },
+        { action: "cancel", tool: "run_cancel", runId: activeRunId },
+        { action: "supersede", tool: "run_supersede", runId: activeRunId },
+        { action: "wait", runId: activeRunId },
+        { action: "reconcile", runId: activeRunId }
+      ]
+    }
+  };
+}
+
+async function loadOptionalRun(engine: AgentFlowEngine, runId: string): Promise<RunState | undefined> {
+  try {
+    return await engine.loadRun(runId);
+  } catch (error) {
+    if (isAgentFlowCode(error, "RUN_NOT_FOUND")) return undefined;
+    throw error;
+  }
 }
 
 async function loadCurrentRun(paths: ProjectPaths, engine: AgentFlowEngine): Promise<RunState | undefined> {

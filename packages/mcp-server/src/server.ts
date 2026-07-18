@@ -7,6 +7,9 @@ import {
   ArtifactContractKindSchema,
   artifactPayloadHash,
   isArtifactContractKind,
+  projectChangeReceipt,
+  projectRunSection,
+  projectRunSummary,
   validateArtifactPayload,
   sha256,
   ThreadCapabilitiesSchema,
@@ -23,7 +26,9 @@ import {
   type PrdContract,
   type QaReportContract,
   type ReleasePlanContract,
+  type ChangeReceipt,
   type RunState,
+  type RunSummary,
   type WorkerResult,
   type UxArchitectureContract,
   type VerificationRecord
@@ -68,6 +73,20 @@ const VerificationSchema = z.object({
   summary: z.string().default(""),
   recordedAt: z.iso.datetime({ offset: true })
 });
+const StatusResponseProfileSchema = z.enum(["summary", "section", "events", "full"]);
+const MutationResponseProfileSchema = z.enum(["receipt", "full"]);
+const StartResponseProfileSchema = z.enum(["summary", "full"]);
+const StatusCursorSchema = z.object({
+  version: z.literal(1),
+  runId: IdentifierSchema,
+  revision: z.number().int().nonnegative(),
+  section: z.enum(["stages", "tasks", "workers", "artifacts", "gates", "events", "idempotency"]),
+  cursor: z.string().min(1).max(4_096),
+  afterRevision: z.number().int().nonnegative().optional()
+}).strict();
+
+type DefaultResponseProfile = "compact" | "full";
+type MutationResponseProfile = z.infer<typeof MutationResponseProfileSchema>;
 
 const projectSelectorShape = {
   projectRoot: z.string().min(1).max(4_096).optional()
@@ -78,13 +97,23 @@ const runSelectorShape = {
   runId: IdentifierSchema.optional()
 };
 
+const statusSelectorShape = {
+  ...runSelectorShape,
+  responseProfile: StatusResponseProfileSchema.optional(),
+  section: z.enum(["stages", "tasks", "workers", "artifacts", "gates", "idempotency"]).optional(),
+  cursor: z.string().min(1).max(4_096).optional(),
+  pageSize: z.number().int().min(1).max(100).optional(),
+  afterRevision: z.number().int().nonnegative().optional()
+};
+
 const mutationShape = {
   ...projectSelectorShape,
   runId: IdentifierSchema,
   expectedRevision: z.number().int().nonnegative(),
   idempotencyKey: z.string().min(1).max(256),
   actorId: IdentifierSchema,
-  reason: z.string().min(1).max(2_000)
+  reason: z.string().min(1).max(2_000),
+  responseProfile: MutationResponseProfileSchema.optional()
 };
 
 const readAnnotations = {
@@ -98,9 +127,11 @@ const execFileAsync = promisify(execFile);
 export interface AgentFlowMcpServerOptions {
   projectRoot?: string;
   projectRootResolver?: ProjectRootResolver;
+  defaultResponseProfile?: DefaultResponseProfile;
 }
 
 export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}): McpServer {
+  const defaultResponseProfile = options.defaultResponseProfile ?? "compact";
   const server = new McpServer({
     name: "agentflow",
     version: agentFlowVersion
@@ -123,6 +154,16 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     await assertProjectInitialized(paths);
     return { paths, target: await mutationTarget(paths, input, defaultActor) };
   };
+  const mutationOutput = async (
+    input: { responseProfile?: MutationResponseProfile | undefined },
+    previous: RunState,
+    action: () => Promise<RunState>
+  ): Promise<RunState | ChangeReceipt> => {
+    const next = await action();
+    return mutationProfile(input.responseProfile, defaultResponseProfile) === "full"
+      ? next
+      : boundedChangeReceipt(previous, next);
+  };
 
   server.registerTool("pipeline_get", {
     title: "Get AgentFlow pipeline",
@@ -137,14 +178,72 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("status_get", {
     title: "Get AgentFlow run status",
-    description: "Return a run state, defaulting to the project's current run.",
-    inputSchema: runSelectorShape,
+    description: "Return a bounded summary by default, or one paged section, event page, or explicit full state.",
+    inputSchema: statusSelectorShape,
     annotations: readAnnotations
   }, async (input) => handleTool(async () => {
     const paths = await pathsFor(input?.projectRoot);
     await assertProjectInitialized(paths);
     const engine = await createEngine(paths);
-    return engine.loadRun(await resolveRunId(input?.runId, paths));
+    const state = await engine.loadRun(await resolveRunId(input?.runId, paths));
+    const profile = input?.responseProfile ?? (defaultResponseProfile === "full" ? "full" : "summary");
+    const hasPageSelector = input?.section !== undefined
+      || input?.cursor !== undefined
+      || input?.pageSize !== undefined
+      || input?.afterRevision !== undefined;
+    if ((profile === "summary" || profile === "full") && hasPageSelector) {
+      throw new AgentFlowError(
+        `The ${profile} response profile does not accept section or pagination selectors`,
+        "RUN_RESPONSE_PROFILE_INVALID"
+      );
+    }
+    if (profile === "events" && input?.section !== undefined) {
+      throw new AgentFlowError(
+        "The events response profile always selects the events section",
+        "RUN_RESPONSE_PROFILE_INVALID"
+      );
+    }
+    if (profile === "full") return state;
+    if (profile === "summary") return boundedRunSummary(state);
+    if (input?.afterRevision !== undefined && profile !== "events") {
+      throw new AgentFlowError("afterRevision is only valid for the events response profile", "RUN_REVISION_CURSOR_INVALID");
+    }
+    if (input?.afterRevision !== undefined && input.cursor !== undefined) {
+      throw new AgentFlowError("Use either afterRevision or cursor for an event page", "RUN_REVISION_CURSOR_INVALID");
+    }
+    if (input?.afterRevision !== undefined && input.afterRevision > state.revision) {
+      throw new AgentFlowError("The requested event revision is ahead of the Run", "RUN_REVISION_CURSOR_INVALID", {
+        requestedRevision: input.afterRevision,
+        actualRevision: state.revision
+      });
+    }
+    if (profile === "events") {
+      if (input?.afterRevision === state.revision) {
+        return {
+          version: 1,
+          runId: state.id,
+          revision: state.revision,
+          section: "events",
+          items: [],
+          total: 0
+        };
+      }
+      const decodedCursor = decodeStatusCursor(input?.cursor, state, "events");
+      const afterRevision = input?.afterRevision ?? decodedCursor?.afterRevision;
+      const eventState = afterRevision === undefined ? state : runWithEventsAfterRevision(state, afterRevision);
+      return compactStatusPage(projectRunSection(eventState, "events", {
+        ...(decodedCursor === undefined ? {} : { cursor: decodedCursor.cursor }),
+        ...(input?.pageSize === undefined ? {} : { pageSize: input.pageSize })
+      }), state, afterRevision);
+    }
+    if (input?.section === undefined) {
+      throw new AgentFlowError("A named section is required for the section response profile", "RUN_SECTION_REQUIRED");
+    }
+    const decodedCursor = decodeStatusCursor(input.cursor, state, input.section);
+    return compactStatusPage(projectRunSection(state, input.section, {
+      ...(decodedCursor === undefined ? {} : { cursor: decodedCursor.cursor }),
+      ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize })
+    }), state);
   }));
 
   server.registerTool("structured_choice_request", {
@@ -165,17 +264,75 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       projectType: z.enum(["new", "existing"]),
       hasUi: z.boolean(),
       requestedRunId: IdentifierSchema.optional(),
-      requestKey: z.string().min(1).max(256)
+      requestKey: z.string().min(1).max(256),
+      responseProfile: StartResponseProfileSchema.optional()
     }
   }, async (input) => handleTool(async () => {
     const paths = await pathsFor(input.projectRoot);
-    return startOrResumeRun(paths, {
+    const result = await startOrResumeRun(paths, {
       requirement: input.requirement,
       projectType: input.projectType,
       hasUi: input.hasUi,
       ...(input.requestedRunId === undefined ? {} : { requestedRunId: input.requestedRunId }),
       requestKey: input.requestKey
     });
+    if (result.action === "conflict") return result;
+    const profile = input.responseProfile ?? (defaultResponseProfile === "full" ? "full" : "summary");
+    return profile === "full"
+      ? result
+      : {
+          action: result.action,
+          projectRoot: result.projectRoot,
+          initialized: result.initialized,
+          summary: boundedRunSummary(result.state)
+        };
+  }));
+
+  server.registerTool("run_cancel", {
+    title: "Cancel AgentFlow Run",
+    description: "Audit and cancel an idle Run while preserving collected results and cleanup facts.",
+    inputSchema: mutationShape
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    return mutationOutput(input, target.state, () => (
+      target.engine.cancelRun(target.runId, input.reason, target.context)
+    ));
+  }));
+
+  server.registerTool("run_fail", {
+    title: "Fail AgentFlow Run",
+    description: "Audit and fail an idle Run while preserving collected results and cleanup facts.",
+    inputSchema: mutationShape
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    return mutationOutput(input, target.state, () => (
+      target.engine.failRun(target.runId, input.reason, target.context)
+    ));
+  }));
+
+  server.registerTool("run_block", {
+    title: "Block AgentFlow Run",
+    description: "Audit and block an idle Run while preserving collected results and cleanup facts.",
+    inputSchema: mutationShape
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    return mutationOutput(input, target.state, () => (
+      target.engine.blockRun(target.runId, input.reason, target.context)
+    ));
+  }));
+
+  server.registerTool("run_supersede", {
+    title: "Supersede AgentFlow Run",
+    description: "Audit and supersede an idle Run with an explicit replacement Run ID.",
+    inputSchema: {
+      ...mutationShape,
+      replacementRunId: IdentifierSchema
+    }
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    return mutationOutput(input, target.state, () => (
+      target.engine.supersedeRun(target.runId, input.replacementRunId, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("task_create", {
@@ -205,7 +362,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.createTask(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.createTask(target.runId, {
       id: input.taskId,
       stageId: input.stageId,
       title: input.title,
@@ -225,7 +382,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       expectedOutputs: input.expectedOutputs,
       requiresWorktree: input.requiresWorktree,
       ...(input.risk === undefined ? {} : { risk: input.risk })
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("implementation_plan_materialize", {
@@ -242,11 +399,11 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     const plan = validateArtifactPayload("implementation-plan", input.payload) as ImplementationPlanContract;
     validateArtifactReferences("implementation-plan", plan, target.state);
     const targetStageId = resolveStageId(input.targetStageId, target.state.activeStageId, target.runId);
-    return target.engine.materializeImplementationPlan(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.materializeImplementationPlan(target.runId, {
       artifactId: input.artifactId,
       targetStageId,
       plan
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("task_claim", {
@@ -260,13 +417,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.workerId));
-    return target.engine.claimTask(
+    return mutationOutput(input, target.state, () => target.engine.claimTask(
       target.runId,
       input.taskId,
       input.workerId,
       input.leaseSeconds,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("task_heartbeat", {
@@ -280,13 +437,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.workerId));
-    return target.engine.heartbeatTask(
+    return mutationOutput(input, target.state, () => target.engine.heartbeatTask(
       target.runId,
       input.taskId,
       input.workerId,
       input.leaseSeconds,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("task_complete", {
@@ -301,14 +458,14 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.workerId));
-    return target.engine.completeTask(
+    return mutationOutput(input, target.state, () => target.engine.completeTask(
       target.runId,
       input.taskId,
       input.workerId,
       input.verification as VerificationRecord[],
       input.result,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("task_retry", {
@@ -320,7 +477,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.retryTask(target.runId, input.taskId, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.retryTask(target.runId, input.taskId, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("task_setup_abort", {
@@ -333,13 +492,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.abortTaskSetup(
+    return mutationOutput(input, target.state, () => target.engine.abortTaskSetup(
       target.runId,
       input.taskId,
       input.workerId,
       input.reason,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("worker_prepare", {
@@ -356,14 +515,14 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.prepareWorker(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.prepareWorker(target.runId, {
       workerId: input.workerId,
       taskId: input.taskId,
       adapter: input.adapter,
       hostTaskName: input.hostTaskName,
       promptHash: sha256(input.prompt),
       capabilities: input.capabilities
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("worker_dispatch_prepare", {
@@ -412,6 +571,19 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       leaseSeconds: input.leaseSeconds,
       workspace
     }, target.context);
+    if (mutationProfile(input.responseProfile, defaultResponseProfile) === "receipt") {
+      return {
+        receipt: boundedChangeReceipt(target.state, state),
+        dispatch: {
+          adapter: input.adapter,
+          taskName: dispatch.taskName,
+          profile: dispatch.profile,
+          prompt,
+          promptHash,
+          workspace
+        }
+      };
+    }
     return {
       runId: state.id,
       revision: state.revision,
@@ -438,7 +610,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.bindWorker(target.runId, input.workerId, input.externalThreadId, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.bindWorker(target.runId, input.workerId, input.externalThreadId, target.context)
+    ));
   }));
 
   server.registerTool("worker_status", {
@@ -469,7 +643,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.observeWorker(target.runId, input.workerId, input.status, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.observeWorker(target.runId, input.workerId, input.status, target.context)
+    ));
   }));
 
   server.registerTool("worker_collect", {
@@ -483,7 +659,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     await verifyWorkerChangeSet(target.state, input.workerId, input.result);
-    return target.engine.collectWorkerResult(target.runId, input.workerId, input.result, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.collectWorkerResult(target.runId, input.workerId, input.result, target.context)
+    ));
   }));
 
   server.registerTool("worker_interrupt", {
@@ -495,7 +673,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.interruptWorker(target.runId, input.workerId, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.interruptWorker(target.runId, input.workerId, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("worker_fail", {
@@ -507,7 +687,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.failWorker(target.runId, input.workerId, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.failWorker(target.runId, input.workerId, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("worker_close", {
@@ -519,7 +701,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.closeWorker(target.runId, input.workerId, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.closeWorker(target.runId, input.workerId, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("resource_acquire", {
@@ -538,7 +722,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.acquireResource(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.acquireResource(target.runId, {
       resourceId: input.resourceId,
       kind: input.kind,
       resourceKey: input.resourceKey,
@@ -547,7 +731,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       owner: input.owner,
       leaseSeconds: input.leaseSeconds,
       metadata: input.metadata
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("resource_heartbeat", {
@@ -561,13 +745,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.heartbeatResource(
+    return mutationOutput(input, target.state, () => target.engine.heartbeatResource(
       target.runId,
       input.resourceId,
       input.owner,
       input.leaseSeconds,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("resource_rekey", {
@@ -581,13 +765,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.rekeyResource(
+    return mutationOutput(input, target.state, () => target.engine.rekeyResource(
       target.runId,
       input.resourceId,
       input.owner,
       input.resourceKey,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("resource_status", {
@@ -620,14 +804,14 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.beginResourceOperation(
+    return mutationOutput(input, target.state, () => target.engine.beginResourceOperation(
       target.runId,
       input.resourceId,
       input.owner,
       input.operationId,
       input.tool,
       target.context
-    );
+    ));
   }));
 
   server.registerTool("resource_operation_finish", {
@@ -645,13 +829,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.finishResourceOperation(target.runId, input.resourceId, input.owner, {
+    return mutationOutput(input, target.state, () => target.engine.finishResourceOperation(target.runId, input.resourceId, input.owner, {
       operationId: input.operationId,
       status: input.status,
       ...(input.resultHash === undefined ? {} : { resultHash: input.resultHash }),
       affectedNodeIds: input.affectedNodeIds,
       summary: input.summary
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("resource_release", {
@@ -664,7 +848,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("worker", input.owner));
-    return target.engine.releaseResource(target.runId, input.resourceId, input.owner, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.releaseResource(target.runId, input.resourceId, input.owner, input.reason, target.context)
+    ));
   }));
 
   server.registerTool("artifact_register", {
@@ -707,7 +893,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       }
       metadata = { ...metadata, contract: contractMetadata(input.kind, parsedPayload) };
     }
-    return target.engine.registerArtifact(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.registerArtifact(target.runId, {
       id: input.artifactId,
       stageId: input.stageId,
       kind: input.kind,
@@ -715,7 +901,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       sha256: input.sha256,
       producedBy: input.producedBy,
       metadata
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("artifact_validate", {
@@ -734,7 +920,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   server.registerTool("gate_decision_request", {
     title: "Request an AgentFlow Gate decision",
     description: "Present the current persisted human Gate and atomically finalize an explicit accepted selection.",
-    inputSchema: GateDecisionRequestSchema,
+    inputSchema: GateDecisionRequestSchema.extend({
+      responseProfile: MutationResponseProfileSchema.optional()
+    }),
     annotations: {
       readOnlyHint: false,
       idempotentHint: true,
@@ -742,7 +930,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input, extra) => handleTool(async () => {
     const { target } = await targetFor(input, actor("user", "mcp-user"));
-    return requestGateDecision(
+    const outcome = await requestGateDecision(
       server.server,
       target.engine,
       target.state,
@@ -750,6 +938,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       target.context,
       extra.signal
     );
+    if (!("state" in outcome) || mutationProfile(input.responseProfile, defaultResponseProfile) === "full") {
+      return outcome;
+    }
+    return {
+      outcome: outcome.outcome,
+      receipt: boundedChangeReceipt(target.state, outcome.state)
+    };
   }));
 
   server.registerTool("gate_resolve", {
@@ -764,12 +959,12 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("user", "mcp-user"));
-    return target.engine.resolveGate(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.resolveGate(target.runId, {
       gateId: input.gateId,
       decision: input.decision,
       resolution: input.resolution,
       ...(input.choice === undefined ? {} : { choice: input.choice })
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("stage_preflight_report", {
@@ -784,12 +979,12 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    return target.engine.reportStagePreflight(target.runId, {
+    return mutationOutput(input, target.state, () => target.engine.reportStagePreflight(target.runId, {
       stageId: input.stageId,
       host: input.host,
       availableCapabilities: input.availableCapabilities,
       ttlSeconds: input.ttlSeconds
-    }, target.context);
+    }, target.context));
   }));
 
   server.registerTool("stage_complete", {
@@ -802,7 +997,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const stageId = resolveStageId(input.stageId, target.state.activeStageId, target.runId);
-    return target.engine.completeStage(target.runId, stageId, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.completeStage(target.runId, stageId, target.context)
+    ));
   }));
 
   server.registerTool("stage_skip", {
@@ -816,7 +1013,9 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const stageId = resolveStageId(input.stageId, target.state.activeStageId, target.runId);
-    return target.engine.skipStage(target.runId, stageId, input.reason, target.context);
+    return mutationOutput(input, target.state, () => (
+      target.engine.skipStage(target.runId, stageId, input.reason, target.context)
+    ));
   }));
 
   return server;
@@ -839,9 +1038,13 @@ function jsonResult(value: object): CallToolResult {
 
 function errorResult(error: unknown): CallToolResult {
   const payload = error instanceof AgentFlowError
-    ? { error: error.code, message: error.message, details: error.details }
+    ? { error: error.code, message: error.message, details: redactErrorDetails(error.details) }
     : error instanceof z.ZodError
-      ? { error: "ARTIFACT_CONTRACT_INVALID", message: "Artifact payload does not match its contract", details: { issues: error.issues } }
+      ? {
+          error: "ARTIFACT_CONTRACT_INVALID",
+          message: "Artifact payload does not match its contract",
+          details: redactErrorDetails({ issues: error.issues })
+        }
     : {
         error: "UNEXPECTED",
         message: "Unexpected AgentFlow MCP failure",
@@ -852,6 +1055,190 @@ function errorResult(error: unknown): CallToolResult {
     structuredContent: payload,
     isError: true
   };
+}
+
+function mutationProfile(
+  requested: MutationResponseProfile | undefined,
+  defaultProfile: DefaultResponseProfile
+): MutationResponseProfile {
+  return requested ?? (defaultProfile === "full" ? "full" : "receipt");
+}
+
+function boundedRunSummary(state: RunState): RunSummary & { lane: RunState["workflow"]["lane"] } {
+  const summary = compactResponse({
+    ...projectRunSummary(state),
+    lane: state.workflow.lane
+  });
+  while (serializedBytes(summary) > 8_192) {
+    const candidates = [
+      { key: "tasks" as const, bytes: itemBytes(summary.currentTasks.at(-1)) },
+      { key: "workers" as const, bytes: itemBytes(summary.liveWorkers.at(-1)) },
+      { key: "blockers" as const, bytes: itemBytes(summary.blockers.at(-1)) }
+    ].filter((candidate) => candidate.bytes > 0)
+      .sort((left, right) => right.bytes - left.bytes);
+    const largest = candidates[0];
+    if (largest === undefined) break;
+    if (largest.key === "tasks") {
+      summary.currentTasks.pop();
+      summary.currentTaskOverflow += 1;
+    } else if (largest.key === "workers") {
+      summary.liveWorkers.pop();
+      summary.liveWorkerOverflow += 1;
+    } else {
+      summary.blockers.pop();
+      summary.blockerOverflow += 1;
+    }
+  }
+  return summary;
+}
+
+function boundedChangeReceipt(previous: RunState, next: RunState): ChangeReceipt {
+  const receipt = compactResponse(projectChangeReceipt(previous, next));
+  const sections = ["stages", "tasks", "workers", "artifacts", "gates"] as const;
+  while (serializedBytes(receipt) > 4_096) {
+    const candidates = sections.map((section) => ({
+      section,
+      bytes: itemBytes(receipt.changed[section].at(-1))
+    })).filter((candidate) => candidate.bytes > 0)
+      .sort((left, right) => right.bytes - left.bytes);
+    const largest = candidates[0];
+    if (largest === undefined) break;
+    receipt.changed[largest.section].pop();
+    receipt.changed.overflow[largest.section] += 1;
+  }
+  return receipt;
+}
+
+function serializedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
+}
+
+function itemBytes(value: unknown): number {
+  return value === undefined ? 0 : Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function compactStatusPage(
+  page: ReturnType<typeof projectRunSection>,
+  state: RunState,
+  afterRevision?: number
+): ReturnType<typeof projectRunSection> {
+  const projected = page.nextCursor === undefined
+    ? page
+    : {
+        ...page,
+        nextCursor: Buffer.from(JSON.stringify({
+          version: 1,
+          runId: state.id,
+          revision: state.revision,
+          section: page.section,
+          cursor: page.nextCursor,
+          ...(afterRevision === undefined ? {} : { afterRevision })
+        }), "utf8").toString("base64url")
+      };
+  return compactResponse(projected);
+}
+
+function decodeStatusCursor(
+  cursor: string | undefined,
+  state: RunState,
+  section: "stages" | "tasks" | "workers" | "artifacts" | "gates" | "events" | "idempotency"
+): { cursor: string; afterRevision?: number } | undefined {
+  if (cursor === undefined) return undefined;
+  let parsed: z.infer<typeof StatusCursorSchema>;
+  try {
+    parsed = StatusCursorSchema.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")));
+  } catch {
+    throw new AgentFlowError("The Run status cursor is invalid", "RUN_CURSOR_INVALID");
+  }
+  if (parsed.runId !== state.id || parsed.section !== section) {
+    throw new AgentFlowError("The Run status cursor does not match this query", "RUN_CURSOR_INVALID", {
+      runId: state.id,
+      section
+    });
+  }
+  if (parsed.revision !== state.revision) {
+    throw new AgentFlowError("The Run changed after this status cursor was issued", "RUN_CURSOR_STALE", {
+      cursorRevision: parsed.revision,
+      actualRevision: state.revision
+    });
+  }
+  return {
+    cursor: parsed.cursor,
+    ...(parsed.afterRevision === undefined ? {} : { afterRevision: parsed.afterRevision })
+  };
+}
+
+function runWithEventsAfterRevision(state: RunState, afterRevision: number): RunState {
+  const revisionDelta = state.revision - afterRevision;
+  if (revisionDelta <= 0) return { ...state, events: [] };
+  const mutationRecords = Object.values(state.idempotency)
+    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
+  const firstRecord = mutationRecords.at(-revisionDelta);
+  if (firstRecord === undefined) {
+    return { ...state, events: state.events.slice(-revisionDelta) };
+  }
+  const events = state.events.filter((event) => event.at >= firstRecord.recordedAt);
+  return {
+    ...state,
+    events: events.length === 0 ? state.events.slice(-revisionDelta) : events
+  };
+}
+
+function compactResponse<T>(value: T): T {
+  return redactResponseValue(value) as T;
+}
+
+function redactResponseValue(value: unknown, key?: string, depth = 0): unknown {
+  if (value === undefined) return undefined;
+  if (key !== undefined && isCredentialKey(key)) return "[REDACTED]";
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return redactCredentialText(value);
+  if (depth >= 32) return "[TRUNCATED]";
+  if (Array.isArray(value)) {
+    return value.map((item) => redactResponseValue(item, undefined, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .map(([entryKey, entryValue]) => [
+        entryKey,
+        redactResponseValue(entryValue, entryKey, depth + 1)
+      ]));
+  }
+  return String(value);
+}
+
+function redactErrorDetails(value: unknown, key?: string, depth = 0): unknown {
+  if (value === undefined) return undefined;
+  if (key !== undefined && isCredentialKey(key)) return "[REDACTED]";
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return redactCredentialText(value).slice(0, 2_000);
+  if (depth >= 8) return "[TRUNCATED]";
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => redactErrorDetails(item, undefined, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .slice(0, 50)
+      .map(([entryKey, entryValue]) => [
+        entryKey,
+        redactErrorDetails(entryValue, entryKey, depth + 1)
+      ]));
+  }
+  return String(value).slice(0, 2_000);
+}
+
+function isCredentialKey(key: string): boolean {
+  return /(?:access[-_]?key|api[-_]?key|authorization|auth[-_]?token|cookie|credential|otp|password|private[-_]?key|secret|session|token)/iu.test(key);
+}
+
+function redactCredentialText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [REDACTED]")
+    .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}\b/giu, "[REDACTED]")
+    .replace(/\b(?:gh[pousr]|github_pat|npm)_[A-Za-z0-9_]{8,}\b/giu, "[REDACTED]")
+    .replace(/\bAKIA[A-Z0-9]{12,}\b/gu, "[REDACTED]")
+    .replace(/\b((?:_?auth)?token|otp|password|secret|api[-_]?key)\s*[:=]\s*([^\s&]+)/giu, "$1=[REDACTED]")
+    .replace(/https:\/\/([^:\s/@]+):([^@\s]+)@/giu, "https://$1:[REDACTED]@");
 }
 
 function actor(kind: Actor["kind"], id: string): Actor {
