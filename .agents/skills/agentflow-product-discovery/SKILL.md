@@ -11,7 +11,7 @@ Use the installed Superpowers `brainstorming` Skill as the dialogue method, then
 
 1. Confirm the active Stage is S01 and read S00 `project-context` by URI and hash.
 2. For an existing project, inspect the relevant repository behavior, current design system, documentation, and constraints before proposing changes.
-3. Inspect repository and Run evidence first. For material bounded tradeoffs, use `structured_choice_request` or an exposed native equivalent; batch at most three independent questions and ask dependent questions later.
+3. Inspect repository and Run evidence first. For a non-mandatory tradeoff, apply the safe recommended default without asking and record the recommendation plus rationale. Use `structured_choice_request` or an exposed native equivalent only for a genuinely blocking material choice without a safe default; batch at most three independent questions and ask dependent questions later.
 4. Establish users, problem, desired outcome, current behavior, scope, non-goals, constraints, risks, dependencies, success metrics, and unresolved decisions.
 5. Present two or three viable approaches with tradeoffs and a recommendation. Avoid visual styling decisions that belong to the Figma concept Stage.
 6. Show the consolidated brief to the user and obtain explicit confirmation before registering it.

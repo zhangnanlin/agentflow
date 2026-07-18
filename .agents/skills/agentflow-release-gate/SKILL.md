@@ -33,7 +33,7 @@ For `package-registry`, also use a zero-minute window but require immediate immu
 
 Write and register `release-plan.json` following [references/release-plan-contract.md](references/release-plan-contract.md). Present the target, revision, migrations, rollout, rollback, and risks to the user.
 
-Use `structured_choice_request` only for bounded release-plan clarification after inspecting QA, repository, and Run evidence. For the release Gate itself, use `gate_decision_request` so the decision is bound to the current Release Plan Artifact hash and requires one explicit interaction.
+After inspecting QA, repository, and Run evidence, apply the safe recommended default without asking for a non-mandatory release-plan clarification and record its source plus rationale. Use `structured_choice_request` only for a genuinely blocking material choice without a safe default. For the release Gate itself, use `gate_decision_request` so the decision is bound to the current Release Plan Artifact hash and requires one explicit interaction.
 
 Resolve `release-approved` only from explicit authorization. A prior user instruction such as "push when complete" or "create and push v1.2.3" may authorize one matching `source-control` plan at the exact QA-approved revision; bind the original instruction, plan hash, QA hash, remote, and refs in the Gate resolution. Generic "continue" messages, recommendation, silence, timeout, cancellation, and approval for another artifact never count, and the operation cannot broaden beyond the named refs. `package-registry` and `production` always require approval of the current Release Plan and QA hashes after they are presented. If structured input is unavailable, use one concise text fallback only once.
 

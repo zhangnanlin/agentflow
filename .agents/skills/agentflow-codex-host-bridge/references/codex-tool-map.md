@@ -14,7 +14,7 @@ Use the current host's equivalent operation when names differ. Never substitute 
 
 ## Structured User Input
 
-`host.user-input.structured` is a user interaction capability, not a Worker lifecycle capability. In Codex Default mode, prefer `structured_choice_request` or an already exposed native structured-input control for bounded choices and `gate_decision_request` for pending human Gates. Do not create a user-owned task and never use GUI automation to collect a choice. On resume, reload the persisted Gate first and do not ask again after an accepted response.
+`host.user-input.structured` is a user interaction capability, not a Worker lifecycle capability. In Codex Default mode, apply the safe recommended default without asking for a non-mandatory choice and record its source plus rationale. Use `structured_choice_request` or an already exposed native structured-input control only for a genuinely blocking material choice without a safe default, and use `gate_decision_request` for pending human Gates. Do not create a user-owned task and never use GUI automation to collect a choice. On resume, reload the persisted Gate first and do not ask again after an accepted response.
 
 For a bound live Worker, never substitute `task_complete` for `worker_collect`. Any valid terminal structured result, including `blocked` or `failed`, goes through `worker_collect`; a confirmed native or protocol failure without a valid result goes through `worker_fail`; a confirmed native interruption goes through `worker_interrupt`. Task completion does not prove that the native Worker stopped.
 

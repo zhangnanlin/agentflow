@@ -42,7 +42,10 @@ describe("global routing contract", () => {
   it("publishes the canonical low-friction structured-input priority", () => {
     for (const phrase of [
       "Inspect repository and Run evidence first",
+      "mandatory or non-mandatory",
+      "recommended default without asking",
       "structured_choice_request",
+      "genuinely blocking material choice without a safe default",
       "three independent",
       "gate_decision_request",
       "one concise text fallback",
@@ -51,6 +54,8 @@ describe("global routing contract", () => {
     ]) {
       expect(AGENTFLOW_MCP_INSTRUCTIONS).toContain(phrase);
     }
+    expect(AGENTFLOW_MCP_INSTRUCTIONS)
+      .not.toContain("Use structured_choice_request for material bounded choices across modes");
   });
 
   it("keeps every decision-producing Skill aligned with structured choices and Artifact-bound Gates", async () => {
@@ -61,10 +66,15 @@ describe("global routing contract", () => {
       ".agents/skills/agentflow-prd-authoring/SKILL.md",
       ".agents/skills/agentflow-figma-concept-explorer/SKILL.md",
       ".agents/skills/agentflow-engineering-plan/SKILL.md",
-      ".agents/skills/agentflow-orchestrator/SKILL.md"
+      ".agents/skills/agentflow-orchestrator/SKILL.md",
+      ".agents/skills/agentflow-release-gate/SKILL.md",
+      ".agents/skills/agentflow-codex-host-bridge/references/codex-tool-map.md"
     ];
     for (const path of choiceSkills) {
-      expect(await readFile(resolve(path), "utf8"), path).toContain("structured_choice_request");
+      const content = await readFile(resolve(path), "utf8");
+      expect(content, path).toContain("structured_choice_request");
+      expect(content, path).toMatch(/recommend(?:ation|ed default).{0,100}without asking/is);
+      expect(content, path).toMatch(/blocking material choice without a safe (?:recommended )?default/is);
     }
 
     const gateSkills = [

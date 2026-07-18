@@ -294,6 +294,8 @@ describe("standalone AgentFlow distribution", () => {
     expect(orchestratorSkill).toContain("run_start_or_resume");
     expect(routerSkill).toContain("agentflow:full");
     expect(routerSkill).toContain("Do not call `structured_choice_request` for a non-mandatory choice");
+    expect(routingContract).toMatch(/recommend(?:ation|ed default).{0,100}without asking/is);
+    expect(routingContract).toMatch(/blocking material choice without a safe (?:recommended )?default/is);
     expect(orchestratorSkill).toContain("workflow_escalate");
     expect(orchestratorSkill).toContain("Apply the recommended default without asking");
     expect(orchestratorSkill).toContain("`skills.sh` is discovery evidence only");
@@ -479,6 +481,7 @@ describe("standalone AgentFlow distribution", () => {
       id: 1,
       result: {
         capabilities: { tools: expect.any(Object) },
+        instructions: expect.stringMatching(/recommended default without asking[\s\S]*blocking material choice without a safe default/i),
         serverInfo: { version: "0.4.0" }
       }
     });
@@ -563,10 +566,13 @@ describe("standalone AgentFlow distribution", () => {
       structuredInputSkillNames
     ));
     for (const skillName of structuredChoiceSkillNames) {
-      expect(await readFile(
+      const content = await readFile(
         join(home, ".agents", "skills", skillName, "SKILL.md"),
         "utf8"
-      )).toContain("structured_choice_request");
+      );
+      expect(content, skillName).toContain("structured_choice_request");
+      expect(content, skillName).toMatch(/recommend(?:ation|ed default).{0,100}without asking/is);
+      expect(content, skillName).toMatch(/blocking material choice without a safe (?:recommended )?default/is);
     }
     const [installedRouter, installedOrchestrator, installedCodexBridge] = await Promise.all([
       readFile(join(home, ".agents", "skills", "agentflow-auto-router", "SKILL.md"), "utf8"),

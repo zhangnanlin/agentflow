@@ -27,7 +27,7 @@ Routing is durable model instruction, not transport interception. Higher-priorit
 
 ## User Input Contract
 
-Inspect repository and Run evidence first. Use `structured_choice_request` for a material bounded choice, or an already exposed native structured-input control as an equivalent. Batch no more than three independent questions and defer dependent questions. If structured input is unavailable, issue one concise text fallback once; do not repeat an accepted answer.
+Inspect repository and Run evidence first, then classify each choice as mandatory or non-mandatory. For a non-mandatory choice, apply the documented recommended default without asking and record its source plus rationale. Use `structured_choice_request` only for a genuinely blocking material choice without a safe default, or use an already exposed native structured-input control as an equivalent. Batch no more than three independent questions and defer dependent questions. If structured input is unavailable, issue one concise text fallback once; do not repeat an accepted answer.
 
 Use `gate_decision_request` for pending human Gates. Its persisted question, options, revision, actor, and Artifact hash are authoritative. Recommendation, silence, timeout, cancellation, and an approval for another Artifact never authorize a Gate.
 

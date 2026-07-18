@@ -12,11 +12,13 @@ export const AGENTFLOW_ROUTER_BODY = `## AgentFlow automatic routing
 
 ## Structured user input
 - Inspect repository and Run evidence first; do not ask questions that the available evidence already answers.
-- Use structured_choice_request for material bounded choices across modes, or an already exposed native structured-input control as an equivalent.
+- Classify each choice as mandatory or non-mandatory before opening an interaction.
+- For a non-mandatory choice, apply the documented recommended default without asking and record its source plus rationale.
+- Use structured_choice_request only for a genuinely blocking material choice without a safe default, or use an already exposed native structured-input control as an equivalent.
 - Batch at most three independent questions; ask dependent questions only after the earlier answers are known.
 - Use gate_decision_request for a pending human Gate so its persisted question, options, revision, actor, and Artifact hash remain authoritative.
 - Use one concise text fallback only after structured input is unavailable.
-- Never repeat accepted answers or infer a decision from recommendation, silence, timeout, cancellation, or unrelated approval.`;
+- Never repeat accepted answers. For a mandatory Gate, never infer a decision from recommendation, silence, timeout, cancellation, or unrelated approval.`;
 
 export const AGENTFLOW_MCP_INSTRUCTIONS = `${AGENTFLOW_ROUTER_BODY}
 Treat configured tools and static host files as insufficient evidence of live authentication or capability.`;

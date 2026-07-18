@@ -36,7 +36,7 @@ Build `design-concepts.json` using [references/design-concepts-contract.md](refe
 
 Call `artifact_validate` with kind `design-concepts`, write the normalized payload, and register it with the returned hash. Present screenshots and a concise comparison to the user. Resolve `design-direction-approved` only with an explicit structured `choice` of `A`, `B`, `C`, or `mixed`.
 
-Use `structured_choice_request` for bounded concept clarification after inspecting the UX Artifact and existing Figma evidence. Batch at most three independent questions and use one concise text fallback only if structured input is unavailable. For the actual human Gate, use `gate_decision_request` so the selected direction is bound to the current design-concepts Artifact hash. Never infer selection from the recommendation, silence, timeout, cancellation, or another approval.
+After inspecting the UX Artifact and existing Figma evidence, apply the safe recommended default without asking for a non-mandatory concept clarification and record its source plus rationale. Use `structured_choice_request` only for a genuinely blocking material choice without a safe default. Batch at most three independent questions and use one concise text fallback only if structured input is unavailable. For the actual human Gate, use `gate_decision_request` so the selected direction is bound to the current design-concepts Artifact hash. Never infer the mandatory Gate selection from the recommendation, silence, timeout, cancellation, or another approval.
 
 ## Stop Boundary
 

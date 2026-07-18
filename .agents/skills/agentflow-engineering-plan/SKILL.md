@@ -23,7 +23,7 @@ Use the pinned `writing-plans` Skill for planning discipline, then adapt its out
 
 Write `implementation-plan.json` following [references/implementation-plan-contract.md](references/implementation-plan-contract.md). Validate and register it before presenting a concise plan summary to the user.
 
-Inspect architecture, repository, and Run evidence before asking. Use `structured_choice_request` for material bounded planning choices, with at most three independent questions and one concise text fallback only when structured input is unavailable. Never repeat an accepted answer.
+Inspect architecture, repository, and Run evidence before asking. Apply the safe recommended default without asking for a non-mandatory planning choice and record its source plus rationale. Use `structured_choice_request` only for a genuinely blocking material choice without a safe default, with at most three independent questions and one concise text fallback only when structured input is unavailable. Never repeat an accepted answer.
 
 Request `engineering-plan-approved` with `gate_decision_request` and resolve it only from an explicit user decision bound to the current implementation-plan Artifact hash. Recommendation, silence, timeout, cancellation, and unrelated approval never count. Do not create S11 Tasks or edit production code before approval.
 
