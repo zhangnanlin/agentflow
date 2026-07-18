@@ -1,6 +1,6 @@
 # AgentFlow Host Setup
 
-This guide covers user-global installation, host OAuth, dynamic project resolution, diagnostics, compatibility, migration, and rollback for Codex, Cursor, and VS Code.
+This guide covers user-global installation, Supervisor and Worker separation, host OAuth, dynamic project resolution, diagnostics, compatibility, migration, and rollback for Codex, Cursor, and VS Code.
 
 ## Global Setup
 
@@ -10,7 +10,7 @@ Install AgentFlow once for the current user:
 npx --yes agentflow@0.4.0 setup --host codex
 ```
 
-Use `cursor`, `vscode`, or `all` for another host. Run the same command again to update AgentFlow-owned files while preserving unrelated Skills and host settings. Preview the complete validated write plan with `--dry-run`.
+Use `cursor`, `vscode`, or `all` for another host. Run the same command again to update AgentFlow-owned files while preserving unrelated Skills, custom agents, and host settings. Preview the complete validated write plan with `--dry-run`.
 
 The npm version is immutable. The corresponding immutable Git tag is an alternative for environments that install directly from GitHub:
 
@@ -41,10 +41,29 @@ Restart Codex if it has not reloaded the installed bundle. Do not rerun setup in
 | VS Code on Windows | `%APPDATA%/Code/User/mcp.json` |
 | VS Code on macOS | `~/Library/Application Support/Code/User/mcp.json` |
 | VS Code on Linux | `${XDG_CONFIG_HOME:-~/.config}/Code/User/mcp.json` |
+| Codex Worker profile | `$CODEX_HOME/agents/agentflow-worker.toml` |
+| Cursor Worker profile | `~/.cursor/agents/agentflow-worker.md` |
+| VS Code Worker profile | `~/.copilot/agents/agentflow-worker.agent.md` |
 
 Set `AGENTFLOW_HOME` to move the global runtime, `CODEX_HOME` to select another Codex profile, or pass an absolute `--vscode-config` for a named or portable VS Code profile.
 
 The installed AgentFlow MCP entry has no `--project-root`. Global setup never writes runtime, Skills, instructions, or host configuration into a repository.
+
+## Supervisor And Worker Separation
+
+The main Supervisor remains the only AgentFlow control-plane participant. Its normal host configuration keeps the `agentflow` MCP server so it can route work, persist Task and Worker facts, collect terminal results, integrate changes, and reconcile cleanup.
+
+Delegated work uses the host's native `agentflow-worker` profile instead:
+
+| Host | Native profile behavior |
+| --- | --- |
+| Codex | A standalone custom-agent TOML profile requests a fresh context and uses an empty `[mcp_servers]` table so Supervisor MCP servers are not inherited. |
+| Cursor | A custom subagent Markdown profile exposes only repository read, search, edit, and shell tools; it omits MCP and nested Task tools. |
+| VS Code | A `.agent.md` custom agent uses an explicit `search`, `edit`, `runCommands`, and `runTests` allowlist with `agents: []`; no MCP tool set is included. |
+
+All three profiles instruct the Worker to consume only the bounded Task envelope and referenced repository evidence, never import the Supervisor transcript or full Run state, never create nested agents, and return a compact result before cleanup. Project-scope compatibility setup installs the corresponding files under `.codex/agents/`, `.cursor/agents/`, or `.github/agents/`.
+
+A valid profile file proves only static setup intent. Before native delegation, the live host adapter must still attest zero-history context, an enforced bounded tool profile, AgentFlow MCP disabled, and the required lifecycle operations. Missing or non-conforming evidence causes inline or serial Supervisor fallback; AgentFlow does not infer conformance from files, prose, or GUI state.
 
 ## Merge And Transaction Rules
 
@@ -136,10 +155,29 @@ The report contains:
 
 - `installation`: Node, Git, global CLI/MCP, manifest, lock, router Skill, selected user host config, and restart/OAuth warnings
 - `project`: resolved root and `initialized`, `not-initialized`, or `invalid` evidence for config, pipeline, and current Run
+- `runtime.processes`: sanitized AgentFlow MCP process count, aggregate working set when available, and age-based stale candidates
+- `runtime.runs` and `runtime.responseBudgets`: bounded largest-Run summaries and violations of the 8192-byte status or 4096-byte mutation budgets
+- `runtime.scheduler`: active and expired permits plus the current persisted cooldown state
+- `runtime.cleanup`: pending, unsupported, failed, completed, and stale-live Worker lifecycle counts
+- `runtime.nativeAdapter`: live fresh-context and tool-profile conformance, kept separate from static Worker profile health
+- `skillPolicy`: legacy, warning, invalid, or valid reviewed policy status and active policy count
 
 `not-initialized` is non-blocking before first changing use. An existing malformed `.agentflow` directory is blocking and is never replaced automatically.
 
 For a Stage capability check, add `--stage`, `--live-probe`, and canonical `--capability` values collected from the current host. Provider-qualified live tools and Skills count; arbitrary lookalike names do not.
+
+When the native host bridge exports a `NativeCapabilitySnapshot` v2 file, include it explicitly:
+
+```bash
+node ~/.agentflow/bin/agentflow-cli.mjs \
+  --project-root /absolute/project/path doctor \
+  --host codex \
+  --adapter-snapshot /absolute/path/native-capability.json
+```
+
+The snapshot path is read with a 64 KB bound. Invalid input is rejected without echoing its contents. Runtime diagnostics return aggregate numbers, bounded hashes, fixed status labels, and counts; they never return process command lines, environment values, adapter reason text, tokens, credentials, or OTPs.
+
+After a Worker becomes terminal, AgentFlow persists its result or failure evidence before calling native close and, on Codex, archive. Doctor reports incomplete or unsupported cleanup without redispatching completed work. Resume reconciliation retries only supported incomplete cleanup and leaves the Supervisor task visible.
 
 ## Project Scope Compatibility
 

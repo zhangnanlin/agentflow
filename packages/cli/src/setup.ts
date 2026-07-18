@@ -30,6 +30,11 @@ import {
   type HostClient,
   type HostConfigurationSpec
 } from "./host-config.js";
+import {
+  globalHostWorkerProfileTarget,
+  mergeHostWorkerProfile,
+  projectHostWorkerProfileTarget
+} from "./host-worker-profile.js";
 import { validateSkillPolicyLock } from "./skill-policy.js";
 
 export interface PlannedFile {
@@ -608,9 +613,9 @@ function nativeGlobalPathEnvironment(): GlobalPathEnvironment {
 
 function requiredAction(host: HostClient): string {
   switch (host) {
-    case "codex": return "Restart Codex if needed and authenticate Figma with `codex mcp login figma`.";
-    case "cursor": return "Restart Cursor if needed and authenticate Figma from MCP settings.";
-    case "vscode": return "Restart VS Code if needed, start Figma from MCP: List Servers, and complete Allow Access.";
+    case "codex": return "Restart Codex if needed, confirm the agentflow-worker profile is loaded, and authenticate Figma with `codex mcp login figma` only when required.";
+    case "cursor": return "Restart Cursor if needed, confirm the agentflow-worker subagent is loaded, and authenticate Figma from MCP settings only when required.";
+    case "vscode": return "Restart VS Code if needed, confirm the agentflow-worker custom agent is loaded, and complete Figma Allow Access only when required.";
   }
 }
 
@@ -724,6 +729,16 @@ async function planGlobalSetup(
         { client: host, agentflowMcpEntryPoint: paths.runtimeMcp }
       ))
     });
+    const profilePath = globalHostWorkerProfileTarget(host, paths);
+    const profileSafetyRoot = dirname(dirname(profilePath));
+    await add({
+      path: profilePath,
+      safetyRoot: profileSafetyRoot,
+      content: text(mergeHostWorkerProfile(
+        host,
+        await existingText(profileSafetyRoot, profilePath)
+      ))
+    });
   }
 
   const manifest = {
@@ -737,7 +752,11 @@ async function planGlobalSetup(
     skills: installedSkills,
     pinnedCommits: resolvedPinnedCommits,
     hosts,
-    hostConfigurations: Object.fromEntries(hosts.map((host) => [host, hostPaths[host]]))
+    hostConfigurations: Object.fromEntries(hosts.map((host) => [host, hostPaths[host]])),
+    workerProfiles: Object.fromEntries(hosts.map((host) => [
+      host,
+      globalHostWorkerProfileTarget(host, paths)
+    ]))
   };
   await add({
     path: paths.installManifest,
@@ -914,6 +933,14 @@ export async function planSetup(
         host,
         await existingText(projectRoot, hostPath),
         spec
+      ))
+    });
+    const profilePath = projectHostWorkerProfileTarget(host, projectRoot);
+    await add({
+      path: profilePath,
+      content: text(mergeHostWorkerProfile(
+        host,
+        await existingText(projectRoot, profilePath)
       ))
     });
     requiredActions.add(requiredAction(host));

@@ -10,7 +10,13 @@ import {
   validatePipeline,
   type PipelineDefinition
 } from "@agentflow/core";
+import type { NativeCapabilitySnapshot } from "@agentflow/host-adapter";
 import { parse as parseYaml } from "yaml";
+import {
+  collectDoctorRuntimeDiagnostics,
+  type DoctorRuntimeDependencies,
+  type DoctorRuntimeDiagnostics
+} from "./doctor-runtime.js";
 import {
   globalInstallationPaths,
   type GlobalInstallationPaths,
@@ -23,6 +29,11 @@ import {
   type HostConfigurationPlan,
   type HostConfigurationSpec
 } from "./host-config.js";
+import {
+  globalHostWorkerProfileTarget,
+  inspectHostWorkerProfile,
+  projectHostWorkerProfileTarget
+} from "./host-worker-profile.js";
 import { createEngine, type ProjectPaths } from "./runtime.js";
 import { validateSkillPolicyLock } from "./skill-policy.js";
 import type { GitRunner, SetupScope } from "./setup.js";
@@ -56,6 +67,8 @@ export interface DoctorReport {
   stageId?: string;
   installation: DoctorSection;
   project: ProjectDoctorSection;
+  runtime: DoctorRuntimeDiagnostics;
+  skillPolicy: SkillPolicyDoctorSummary;
   checks: DoctorCheck[];
   capabilities: {
     liveProbeProvided: boolean;
@@ -76,6 +89,14 @@ export interface DoctorOptions {
   gitRunner?: GitRunner;
   globalPathEnvironment?: GlobalPathEnvironment;
   vscodeConfig?: string;
+  nativeCapabilitySnapshot?: NativeCapabilitySnapshot;
+  runtimeDependencies?: DoctorRuntimeDependencies;
+  now?: () => number;
+}
+
+export interface SkillPolicyDoctorSummary {
+  status: "valid" | "legacy" | "warning" | "invalid";
+  activePolicyCount: number;
 }
 
 interface ProjectInspection {
@@ -335,7 +356,7 @@ async function inspectSkillLock(
   skillsRoot: string,
   host: HostClient | undefined,
   checks: DoctorCheck[]
-): Promise<void> {
+): Promise<SkillPolicyDoctorSummary> {
   try {
     const parsed = JSON.parse(await readFile(lockPath, "utf8")) as {
       schemaVersion?: unknown;
@@ -365,7 +386,7 @@ async function inspectSkillLock(
         `${lockPath} uses the legacy Skill lock and activates no content-addressed orchestration policy`,
         "Review enabled orchestration Skills and update skills-lock.json to schemaVersion 2."
       ));
-      return;
+      return { status: "legacy", activePolicyCount: 0 };
     }
     const activeSkillNames = (parsed.dependencies ?? []).flatMap((dependency) => (
       dependency.skills ?? []
@@ -379,7 +400,7 @@ async function inspectSkillLock(
         "The reviewed orchestration Skill lock contains an unsafe Skill name",
         "Remove the unsafe entry and approve a portable content-addressed Skill name."
       ));
-      return;
+      return { status: "invalid", activePolicyCount: activeSkillNames.length };
     }
     const installed = await Promise.all(activeSkillNames.map((name) => (
       pathExists(resolve(skillsRoot, name))
@@ -391,7 +412,7 @@ async function inspectSkillLock(
         `${activeSkillNames.length} reviewed orchestration Skill policies are locked but not installed`,
         "Run setup without --skip-external-skills only when the pinned external Skills are required."
       ));
-      return;
+      return { status: "warning", activePolicyCount: activeSkillNames.length };
     }
     if (installed.some((value) => !value)) {
       checks.push(check(
@@ -400,7 +421,7 @@ async function inspectSkillLock(
         "The reviewed orchestration Skill installation is incomplete",
         "Restore every pinned Skill from the same immutable lock revision before activation."
       ));
-      return;
+      return { status: "invalid", activePolicyCount: activeSkillNames.length };
     }
     try {
       const catalog = await validateSkillPolicyLock(parsed, {
@@ -412,6 +433,7 @@ async function inspectSkillLock(
         "ok",
         `${catalog.policies.length} enabled orchestration Skill policies match reviewed local content`
       ));
+      return { status: "valid", activePolicyCount: catalog.policies.length };
     } catch (error) {
       checks.push(check(
         "orchestration-skill-policy",
@@ -419,6 +441,7 @@ async function inspectSkillLock(
         `Enabled orchestration Skill policy is invalid: ${error instanceof Error ? error.message : String(error)}`,
         "Restore the reviewed local Skill bytes or approve a new immutable lock entry; do not auto-update from the network."
       ));
+      return { status: "invalid", activePolicyCount: activeSkillNames.length };
     }
   } catch (error) {
     checks.push(check(
@@ -432,6 +455,34 @@ async function inspectSkillLock(
       "blocked",
       `Cannot validate orchestration Skill policy at ${lockPath}`,
       "Install a valid reviewed skills-lock.json; do not activate untracked external Skills."
+    ));
+    return { status: "invalid", activePolicyCount: 0 };
+  }
+}
+
+async function inspectWorkerProfile(
+  host: HostClient,
+  path: string,
+  checks: DoctorCheck[]
+): Promise<void> {
+  try {
+    const inspection = inspectHostWorkerProfile(host, await readFile(path, "utf8"));
+    checks.push(check(
+      "worker-profile",
+      inspection.ok ? "ok" : "blocked",
+      inspection.ok
+        ? `${host} Worker profile requests fresh context, bounded native tools, and no AgentFlow MCP`
+        : `${host} Worker profile is invalid (${inspection.issues.length} policy issue${inspection.issues.length === 1 ? "" : "s"})`,
+      inspection.ok
+        ? undefined
+        : `Rerun agentflow setup --host ${host}; do not reuse an unrelated same-name profile.`
+    ));
+  } catch {
+    checks.push(check(
+      "worker-profile",
+      "blocked",
+      `${host} Worker profile is not installed or readable`,
+      `Rerun agentflow setup --host ${host} to install the provider-native profile.`
     ));
   }
 }
@@ -499,7 +550,7 @@ async function inspectProjectInstallation(
   paths: ProjectPaths,
   host: HostClient | undefined,
   checks: DoctorCheck[]
-): Promise<void> {
+): Promise<SkillPolicyDoctorSummary> {
   const runtimePath = durableAgentFlowMcpEntryPoint(paths.projectRoot);
   await inspectTextSurface(
     checks,
@@ -555,7 +606,7 @@ async function inspectProjectInstallation(
     );
   }
 
-  await inspectSkillLock(
+  const skillPolicy = await inspectSkillLock(
     resolve(paths.projectRoot, "skills-lock.json"),
     resolve(paths.projectRoot, ".agents", "skills"),
     host,
@@ -572,7 +623,13 @@ async function inspectProjectInstallation(
         plan.authentication.instructions
       ));
     }
+    await inspectWorkerProfile(
+      host,
+      projectHostWorkerProfileTarget(host, paths.projectRoot),
+      checks
+    );
   }
+  return skillPolicy;
 }
 
 function globalHostTarget(paths: GlobalInstallationPaths, host: HostClient): string {
@@ -603,7 +660,7 @@ async function inspectGlobalInstallation(
   paths: GlobalInstallationPaths,
   host: HostClient | undefined,
   checks: DoctorCheck[]
-): Promise<void> {
+): Promise<SkillPolicyDoctorSummary> {
   await inspectTextSurface(
     checks,
     "global-cli-runtime",
@@ -643,7 +700,7 @@ async function inspectGlobalInstallation(
     },
     "Run global agentflow setup again to restore install metadata."
   );
-  await inspectSkillLock(paths.skillsLock, paths.skillsRoot, host, checks);
+  const skillPolicy = await inspectSkillLock(paths.skillsLock, paths.skillsRoot, host, checks);
 
   if (host) {
     const spec: HostConfigurationSpec = {
@@ -659,7 +716,84 @@ async function inspectGlobalInstallation(
         plan.authentication.instructions
       ));
     }
+    await inspectWorkerProfile(
+      host,
+      globalHostWorkerProfileTarget(host, paths),
+      checks
+    );
   }
+  return skillPolicy;
+}
+
+function appendRuntimeChecks(
+  runtime: DoctorRuntimeDiagnostics,
+  checks: DoctorCheck[]
+): void {
+  checks.push(check(
+    "runtime.mcp-processes",
+    runtime.processes.status === "unavailable"
+      || runtime.processes.staleCandidateCount > 0
+      || runtime.processes.count > 1
+      ? "warn"
+      : "ok",
+    runtime.processes.status === "unavailable"
+      ? "AgentFlow MCP process pressure is unavailable on this host"
+      : `${runtime.processes.count} AgentFlow MCP process${runtime.processes.count === 1 ? "" : "es"}; ${runtime.processes.staleCandidateCount} stale candidate${runtime.processes.staleCandidateCount === 1 ? "" : "s"}`,
+    runtime.processes.status === "unavailable"
+      ? "Use a supported local Windows, Linux, or macOS process probe."
+      : runtime.processes.staleCandidateCount > 0 || runtime.processes.count > 1
+        ? "Restart unused host tasks after their durable Worker results and cleanup receipts are recorded."
+        : undefined
+  ));
+  checks.push(check(
+    "runtime.run-states",
+    runtime.runs.parseFailures > 0 || runtime.runs.readSkipped > 0 ? "warn" : "ok",
+    `${runtime.runs.scanned} Run states scanned; ${runtime.runs.parseFailures} invalid and ${runtime.runs.readSkipped} skipped by bounds`
+  ));
+  checks.push(check(
+    "runtime.response-budgets",
+    runtime.responseBudgets.violationCount > 0 ? "warn" : "ok",
+    `${runtime.responseBudgets.violationCount} compact response-budget violation${runtime.responseBudgets.violationCount === 1 ? "" : "s"}`,
+    runtime.responseBudgets.violationCount > 0
+      ? "Inspect the bounded violation entries and restore summary or receipt projection limits."
+      : undefined
+  ));
+  const cleanupPressure = runtime.cleanup.pendingWorkers
+    + runtime.cleanup.failedWorkers
+    + runtime.cleanup.unsupportedWorkers
+    + runtime.cleanup.staleLiveWorkers;
+  checks.push(check(
+    "runtime.cleanup-backlog",
+    cleanupPressure > 0 ? "warn" : "ok",
+    `${runtime.cleanup.pendingWorkers} pending, ${runtime.cleanup.unsupportedWorkers} unsupported, ${runtime.cleanup.failedWorkers} failed cleanup Workers; ${runtime.cleanup.staleLiveWorkers} stale live Workers`,
+    cleanupPressure > 0
+      ? "Resume reconciliation for supported cleanup; keep unsupported operations explicit and do not redispatch terminal work."
+      : undefined
+  ));
+  checks.push(check(
+    "runtime.scheduler",
+    runtime.scheduler.status === "unavailable"
+      || runtime.scheduler.expiredPermitCount !== 0
+      || runtime.scheduler.cooldownState === "open"
+      ? "warn"
+      : "ok",
+    runtime.scheduler.status === "unavailable"
+      ? "Host Worker budget diagnostics are unavailable"
+      : `${runtime.scheduler.activePermitCount ?? 0} active permits, ${runtime.scheduler.expiredPermitCount ?? 0} expired permits, cooldown ${runtime.scheduler.cooldownState ?? "unknown"}`
+  ));
+  const adapter = runtime.nativeAdapter;
+  checks.push(check(
+    "native-adapter-live",
+    adapter.liveProbeProvided && adapter.conformance === "conforming" ? "ok" : "warn",
+    !adapter.liveProbeProvided
+      ? "No live native adapter capability snapshot was supplied; static profile files are not conformance evidence"
+      : adapter.invalid
+        ? "The live native adapter capability snapshot is invalid or belongs to another host"
+        : `Live ${adapter.host ?? "native"} adapter is ${adapter.conformance ?? "unknown"}; ${adapter.reasonCount ?? 0} conformance issue${adapter.reasonCount === 1 ? "" : "s"}`,
+    adapter.liveProbeProvided && adapter.conformance === "conforming"
+      ? undefined
+      : "Probe the current host adapter and require fresh context, an enforced bounded tool allowlist, and AgentFlow MCP disabled before delegation."
+  ));
 }
 
 export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
@@ -674,17 +808,31 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   ));
   await inspectGit(installationChecks, options.gitRunner ?? nativeGitRunner);
 
+  const globalPaths = globalInstallationPaths(
+    options.globalPathEnvironment ?? processGlobalPathEnvironment(),
+    options.vscodeConfig === undefined ? {} : { vscodeConfig: options.vscodeConfig }
+  );
+  let skillPolicy: SkillPolicyDoctorSummary;
   if (scope === "global") {
-    const globalPaths = globalInstallationPaths(
-      options.globalPathEnvironment ?? processGlobalPathEnvironment(),
-      options.vscodeConfig === undefined ? {} : { vscodeConfig: options.vscodeConfig }
-    );
-    await inspectGlobalInstallation(globalPaths, options.host, installationChecks);
+    skillPolicy = await inspectGlobalInstallation(globalPaths, options.host, installationChecks);
   } else {
-    await inspectProjectInstallation(options.paths, options.host, installationChecks);
+    skillPolicy = await inspectProjectInstallation(options.paths, options.host, installationChecks);
   }
 
   const project = await inspectProject(options.paths);
+  const runtime = await collectDoctorRuntimeDiagnostics({
+    projectRoot: options.paths.projectRoot,
+    agentflowHome: globalPaths.runtimeRoot,
+    ...(options.host === undefined ? {} : { host: options.host }),
+    ...(options.nativeCapabilitySnapshot === undefined
+      ? {}
+      : { nativeCapabilitySnapshot: options.nativeCapabilitySnapshot }),
+    ...(options.runtimeDependencies === undefined
+      ? {}
+      : { dependencies: options.runtimeDependencies }),
+    ...(options.now === undefined ? {} : { now: options.now })
+  });
+  appendRuntimeChecks(runtime, installationChecks);
   let required: string[] = [];
   if (options.stageId) {
     if (project.pipeline === undefined) {
@@ -774,6 +922,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ...(options.stageId === undefined ? {} : { stageId: options.stageId }),
     installation: { status: installationStatus, checks: installationChecks },
     project: { status: project.status, checks: project.checks },
+    runtime,
+    skillPolicy,
     checks,
     capabilities: {
       liveProbeProvided,

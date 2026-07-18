@@ -26,6 +26,7 @@ import {
   processGlobalPathEnvironment,
   runDoctor
 } from "./doctor.js";
+import { readNativeCapabilitySnapshotFile } from "./doctor-runtime.js";
 import { planHostConfiguration, type HostClient } from "./host-config.js";
 import { resolveDistributionAssets } from "./distribution.js";
 import { executeSetup, type SetupScope } from "./setup.js";
@@ -222,6 +223,7 @@ program.command("doctor")
   .option("--stage <stage-id>", "check the live capability contract for one stage")
   .option("--capability <ids...>", "canonical capabilities observed in the current host")
   .option("--live-probe", "declare that the current host registry was probed, even when it exposed no capabilities")
+  .option("--adapter-snapshot <path>", "read a live NativeCapabilitySnapshot v2 JSON file")
   .action(async (options: {
     scope: SetupScope;
     vscodeConfig?: string;
@@ -229,7 +231,11 @@ program.command("doctor")
     stage?: string;
     capability?: string[];
     liveProbe?: boolean;
+    adapterSnapshot?: string;
   }) => {
+    const nativeCapabilitySnapshot = options.adapterSnapshot === undefined
+      ? undefined
+      : await readNativeCapabilitySnapshotFile(resolve(options.adapterSnapshot));
     const report = await runDoctor({
       paths: paths(),
       scope: options.scope,
@@ -240,6 +246,7 @@ program.command("doctor")
       ...(options.host === undefined ? {} : { host: options.host }),
       ...(options.stage === undefined ? {} : { stageId: options.stage }),
       ...(options.capability === undefined ? {} : { capabilities: options.capability }),
+      ...(nativeCapabilitySnapshot === undefined ? {} : { nativeCapabilitySnapshot }),
       liveProbeProvided: options.liveProbe === true
     });
     printJson(report);

@@ -89,6 +89,11 @@ describe("AgentFlow setup", () => {
     const cursor = await readFile(paths.cursorConfig, "utf8");
     const vscode = await readFile(paths.vscodeConfig, "utf8");
     for (const configuration of [codex, cursor, vscode]) expect(configuration).not.toContain("--project-root");
+    for (const profilePath of Object.values(paths.workerProfiles)) {
+      const profile = await readFile(profilePath, "utf8");
+      expect(profile).toContain("agentflow-worker");
+      expect(profile).not.toContain("mcp__agentflow__");
+    }
 
     const manifestSource = await readFile(paths.installManifest, "utf8");
     const manifest = JSON.parse(manifestSource) as Record<string, unknown>;
@@ -329,10 +334,16 @@ describe("AgentFlow setup", () => {
       .toContain("agentflow:auto-router:start");
     expect(await readFile(join(root, ".codex/config.toml"), "utf8"))
       .toContain("agentflow-mcp.mjs");
+    expect(await readFile(join(root, ".codex/agents/agentflow-worker.toml"), "utf8"))
+      .toContain("[mcp_servers]");
     expect(JSON.parse(await readFile(join(root, ".cursor/mcp.json"), "utf8")))
       .toHaveProperty("mcpServers.agentflow");
+    expect(await readFile(join(root, ".cursor/agents/agentflow-worker.md"), "utf8"))
+      .toContain("name: agentflow-worker");
     expect(JSON.parse(await readFile(join(root, ".vscode/mcp.json"), "utf8")))
       .toHaveProperty("servers.agentflow");
+    expect(await readFile(join(root, ".github/agents/agentflow-worker.agent.md"), "utf8"))
+      .toContain("user-invocable: false");
   });
 
   it("rejects a different Skill at the same destination before writing", async () => {

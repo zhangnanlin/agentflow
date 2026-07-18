@@ -25,6 +25,7 @@ export interface GlobalInstallationPaths {
   codexConfig: string;
   cursorConfig: string;
   vscodeConfig: string;
+  workerProfiles: Record<"codex" | "cursor" | "vscode", string>;
 }
 
 export function globalInstallationPaths(
@@ -53,7 +54,12 @@ export function globalInstallationPaths(
     skillsRoot: path.join(home, ".agents", "skills"),
     codexConfig: path.join(codexHome, "config.toml"),
     cursorConfig: path.join(home, ".cursor", "mcp.json"),
-    vscodeConfig
+    vscodeConfig,
+    workerProfiles: {
+      codex: path.join(codexHome, "agents", "agentflow-worker.toml"),
+      cursor: path.join(home, ".cursor", "agents", "agentflow-worker.md"),
+      vscode: path.join(home, ".copilot", "agents", "agentflow-worker.agent.md")
+    }
   };
 }
 
