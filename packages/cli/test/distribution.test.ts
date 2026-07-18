@@ -395,6 +395,7 @@ describe("standalone AgentFlow distribution", () => {
       "README.md",
       "README.zh-CN.md",
       "docs/HOST_SETUP.md",
+      "docs/adaptive-workflow.md",
       "package.json"
     ];
     expect(files).toEqual(expect.arrayContaining(approvedRootFiles));
