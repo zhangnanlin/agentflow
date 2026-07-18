@@ -114,6 +114,7 @@ describe("AgentFlow MCP server", () => {
     expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
       "artifact_register",
       "artifact_validate",
+      "deterministic_operation_run",
       "gate_decision_request",
       "gate_resolve",
       "implementation_plan_materialize",

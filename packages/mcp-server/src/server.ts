@@ -48,6 +48,7 @@ import { assertProjectInitialized, startOrResumeRun } from "./project-lifecycle.
 import { ProjectRootResolver } from "./project-root.js";
 import { GateDecisionRequestSchema, requestGateDecision } from "./gate-decision.js";
 import { StructuredChoiceRequestSchema, requestStructuredChoice } from "./structured-input.js";
+import { DeterministicOperationRunner } from "./deterministic-operations.js";
 import {
   loadPipeline,
   mutationTarget,
@@ -128,6 +129,7 @@ export interface AgentFlowMcpServerOptions {
   projectRoot?: string;
   projectRootResolver?: ProjectRootResolver;
   defaultResponseProfile?: DefaultResponseProfile;
+  deterministicOperationRunner?: DeterministicOperationRunner;
 }
 
 export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}): McpServer {
@@ -143,6 +145,8 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       listRoots: async () => (await server.server.listRoots()).roots
     })
     : new ProjectRootResolver({ fixedRoot: options.projectRoot });
+  const deterministicOperationRunner = options.deterministicOperationRunner
+    ?? new DeterministicOperationRunner();
   const pathsFor = async (explicitProjectRoot?: string) => (
     projectPaths((await resolver.resolve(explicitProjectRoot)).projectRoot)
   );
@@ -164,6 +168,55 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       ? next
       : boundedChangeReceipt(previous, next);
   };
+
+  server.registerTool("deterministic_operation_run", {
+    title: "Run deterministic host operation",
+    description: "Run allowlisted Git sync, verification, readback, timer, or explicit wait work without a model Worker.",
+    inputSchema: {
+      ...projectSelectorShape,
+      operationId: IdentifierSchema,
+      kind: z.string().min(1).max(64),
+      intent: z.string().min(1).max(64).optional(),
+      expectedRevision: z.string().min(1).max(64).optional(),
+      remoteName: z.string().min(1).max(128).optional(),
+      expectedRemoteUrl: z.string().min(1).max(2_048).optional(),
+      authenticationWaitMs: z.number().int().min(0).max(86_400_000).optional(),
+      branch: z.string().min(1).max(256).optional(),
+      remoteRef: z.string().min(1).max(512).optional(),
+      checks: z.array(z.object({
+        kind: z.string().min(1).max(64),
+        expectedRevision: z.string().min(1).max(64).optional()
+      }).strict()).min(1).max(16).optional(),
+      verificationId: IdentifierSchema.optional(),
+      durationMs: z.number().int().min(1).max(300_000).optional(),
+      waitReason: z.enum(["authentication", "user-input", "approval"]).optional(),
+      force: z.boolean().optional(),
+      delete: z.boolean().optional(),
+      rewrite: z.boolean().optional(),
+      fileChanges: z.boolean().optional(),
+      release: z.boolean().optional(),
+      publish: z.boolean().optional(),
+      deploy: z.boolean().optional(),
+      migrate: z.boolean().optional()
+    },
+    annotations: {
+      readOnlyHint: false,
+      idempotentHint: true,
+      destructiveHint: false,
+      openWorldHint: true
+    }
+  }, async (input) => handleTool(async () => {
+    const { projectRoot, ...operation } = input;
+    const needsRepository = operation.kind === "git-sync"
+      || operation.kind === "verification"
+      || operation.kind === "readback";
+    if (!needsRepository) return deterministicOperationRunner.run(operation);
+    const paths = await pathsFor(projectRoot);
+    return deterministicOperationRunner.run({
+      ...operation,
+      repositoryRoot: paths.projectRoot
+    });
+  }));
 
   server.registerTool("pipeline_get", {
     title: "Get AgentFlow pipeline",
