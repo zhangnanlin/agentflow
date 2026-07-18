@@ -373,7 +373,10 @@ describe("AgentFlow MCP server", () => {
     expect(started.structuredContent).toMatchObject({
       action: "started",
       initialized: true,
-      state: { id: "lazy-mcp-run" }
+      state: {
+        id: "lazy-mcp-run",
+        workflow: { lane: "standard", signals: ["new-project"] }
+      }
     });
 
     const conflict = await call(connectedClient, "run_start_or_resume", {
@@ -420,7 +423,10 @@ describe("AgentFlow MCP server", () => {
     expect(next.structuredContent).toMatchObject({
       action: "started",
       initialized: false,
-      state: { id: "next-mcp-run" }
+      state: {
+        id: "next-mcp-run",
+        workflow: { lane: "quick", signals: ["low-risk"] }
+      }
     });
   });
 

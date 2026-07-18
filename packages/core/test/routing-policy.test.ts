@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentFlowEngine,
   JsonRunStore,
+  classifyRoutingSignals,
   defaultPipeline,
   escalateWorkflow,
   evaluateWorkflowPolicy,
@@ -24,6 +25,16 @@ async function engine() {
 }
 
 describe("workflow policy", () => {
+  it.each([
+    ["Fix one isolated parser", []],
+    ["Update multiple modules without changing a public contract", ["standard-scope"]],
+    ["Perform a database migration", ["migration"]],
+    ["\u6267\u884c\u6570\u636e\u5e93\u8fc1\u79fb", ["migration"]],
+    ["agentflow:full fix one isolated parser", ["full-override"]]
+  ] as const)("classifies deterministic request signals for %s", (requirement, expected) => {
+    expect(classifyRoutingSignals(requirement)).toEqual(expected);
+  });
+
   it("selects a four-stage Quick lane for a low-risk existing project change", () => {
     const result = evaluateWorkflowPolicy({
       requirement: "Change one isolated parser",

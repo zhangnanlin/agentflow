@@ -25,6 +25,58 @@ describe("project lifecycle v2 intent and lock semantics", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it.each([
+    ["Fix one isolated parser", "existing", false, "quick", ["low-risk"]],
+    ["Update multiple modules without changing a public contract", "existing", false, "standard", ["standard-scope"]],
+    ["Create a new command line service", "new", false, "standard", ["new-project"]],
+    ["Perform a database migration", "existing", false, "full", ["migration"]],
+    ["Refresh the application screen", "existing", true, "full", ["ui"]],
+    ["agentflow:full fix one isolated parser", "existing", false, "full", ["full-override"]]
+  ] as const)("starts %s in the %s lane", async (requirement, projectType, hasUi, lane, signals) => {
+    const started = await startOrResumeRun(projectPaths(root), {
+      requirement,
+      projectType,
+      hasUi,
+      requestKey: `lane-${lane}`
+    });
+
+    expect(started).toMatchObject({
+      action: "started",
+      state: {
+        workflow: {
+          lane,
+          policyVersion: "2026-07-18.1",
+          signals
+        }
+      }
+    });
+  });
+
+  it("recreates the same adaptive lane while recovering a start journal", async () => {
+    const paths = projectPaths(root);
+    await expect(startOrResumeRun(paths, {
+      requirement: "Update multiple modules without changing a public contract",
+      projectType: "existing",
+      hasUi: false,
+      requestKey: "recover-standard-lane"
+    }, {
+      faultInjector: (checkpoint) => {
+        if (checkpoint === "after-journal") throw new Error("simulated crash after journal");
+      }
+    })).rejects.toThrow("simulated crash after journal");
+
+    const recovered = await startOrResumeRun(paths, {
+      requirement: "Update multiple modules without changing a public contract",
+      projectType: "existing",
+      hasUi: false,
+      requestKey: "recover-standard-lane"
+    });
+    expect(recovered).toMatchObject({
+      action: "started",
+      state: { workflow: { lane: "standard", signals: ["standard-scope"] } }
+    });
+  });
+
   it("resumes the same normalized implicit intent", async () => {
     const paths = projectPaths(root);
     const started = await startOrResumeRun(paths, {

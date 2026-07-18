@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import {
   AgentFlowError,
   canonicalJson,
+  classifyRoutingSignals,
   defaultPipeline,
   sha256,
   validatePipeline,
@@ -266,7 +267,8 @@ async function persistOperation(
       id: runId,
       requirement: input.requirement,
       projectType: input.projectType,
-      hasUi: input.hasUi
+      hasUi: input.hasUi,
+      routingSignals: classifyRoutingSignals(input.requirement)
     });
     await checkpoint(dependencies, "after-run-created");
     await atomicWrite(paths.currentRunPath, { runId });
@@ -314,7 +316,8 @@ async function recoverPendingJournal(paths: ProjectPaths, pending: PendingJourna
       id: pending.runId,
       requirement: pending.request.requirement,
       projectType: pending.request.projectType,
-      hasUi: pending.request.hasUi
+      hasUi: pending.request.hasUi,
+      routingSignals: classifyRoutingSignals(pending.request.requirement)
     });
   }
   if (
