@@ -609,6 +609,8 @@ describe("AgentFlow setup", () => {
     await expect(readFile(join(root, ".agents", "skills", "not-declared", "SKILL.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
     expect(calls.some((args) => args.includes(superpowersCommit))).toBe(true);
+    expect(calls.some((args) => args.includes("core.autocrlf=false")
+      && args.includes("checkout"))).toBe(true);
     expect(result.created).toContain(
       join(root, ".agents", "skills", "brainstorming", "SKILL.md")
     );
@@ -650,6 +652,66 @@ describe("AgentFlow setup", () => {
     expect(checkout).toBeDefined();
     await expect(readFile(join(checkout ?? "", "skills", "brainstorming", "SKILL.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(root, "AGENTS.md")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects external Skill activation when reviewed content does not match", async () => {
+    const root = await temporaryDirectory("agentflow-external-policy-mismatch-");
+    const assets = await fakeDistributionAssets(root);
+    await writeFile(assets.skillsLockPath, JSON.stringify({
+      schemaVersion: 2,
+      updatePolicy: "manual-review-only",
+      dependencies: [{
+        id: "obra-superpowers",
+        organization: "obra",
+        repository: "https://example.invalid/obra/superpowers.git",
+        commit: superpowersCommit,
+        license: "MIT",
+        sourceMode: "external-host",
+        reviewedAt: "2026-07-15",
+        skills: [{
+          name: "brainstorming",
+          activation: "orchestration",
+          contentSha256: "0".repeat(64),
+          entrypoint: "SKILL.md",
+          scriptScope: [],
+          toolScope: ["filesystem.read"],
+          audits: { socket: "pass" },
+          approval: {
+            status: "approved",
+            reviewedBy: "agentflow-maintainers",
+            reviewedAt: "2026-07-15"
+          },
+          adapterCompatibility: ["codex", "cursor", "vscode"],
+          restrictions: ["core-safety-precedence", "manual-updates-only"],
+          policyRules: ["focused-task-briefs"]
+        }]
+      }]
+    }));
+
+    await expect(executeSetup({
+      projectRoot: root,
+      hosts: ["codex"],
+      assets
+    }, {
+      gitRunner: async (args: string[]) => {
+        if (args[0] === "clone") {
+          const checkout = args.at(-1);
+          if (!checkout) throw new Error("missing checkout path");
+          await mkdir(join(checkout, "skills", "brainstorming"), { recursive: true });
+          await writeFile(
+            join(checkout, "skills", "brainstorming", "SKILL.md"),
+            "---\nname: brainstorming\n---\nThink first.\n"
+          );
+        }
+        return args.includes("rev-parse") ? { stdout: `${superpowersCommit}\n` } : { stdout: "" };
+      }
+    })).rejects.toMatchObject({
+      code: "SKILL_POLICY_INVALID",
+      message: expect.stringContaining("content SHA-256")
+    });
+
     await expect(readFile(join(root, "AGENTS.md")))
       .rejects.toMatchObject({ code: "ENOENT" });
   });

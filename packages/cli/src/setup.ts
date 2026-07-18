@@ -30,6 +30,7 @@ import {
   type HostClient,
   type HostConfigurationSpec
 } from "./host-config.js";
+import { validateSkillPolicyLock } from "./skill-policy.js";
 
 export interface PlannedFile {
   path: string;
@@ -448,7 +449,7 @@ interface LockedSuperpowersDependency {
   skills: string[];
 }
 
-function lockDependencies(content: Uint8Array): Array<Record<string, unknown>> {
+function skillLock(content: Uint8Array): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(content));
@@ -459,8 +460,18 @@ function lockDependencies(content: Uint8Array): Array<Record<string, unknown>> {
       { cause: error instanceof Error ? error.message : String(error) }
     );
   }
-  if (typeof parsed !== "object" || parsed === null
-    || !("dependencies" in parsed) || !Array.isArray(parsed.dependencies)) {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new AgentFlowError(
+      "skills-lock.json must contain an object",
+      "EXTERNAL_SKILL_LOCK_INVALID"
+    );
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function lockDependencies(content: Uint8Array): Array<Record<string, unknown>> {
+  const parsed = skillLock(content);
+  if (!("dependencies" in parsed) || !Array.isArray(parsed.dependencies)) {
     throw new AgentFlowError(
       "skills-lock.json must contain a dependencies array",
       "EXTERNAL_SKILL_LOCK_INVALID"
@@ -532,7 +543,15 @@ async function externalSkillFiles(
   try {
     await gitRunner(["clone", "--no-checkout", dependency.repository, checkout]);
     await assertRealDirectory(checkout, "Superpowers checkout");
-    await gitRunner(["-C", checkout, "checkout", "--detach", superpowersCommit]);
+    await gitRunner([
+      "-C",
+      checkout,
+      "-c",
+      "core.autocrlf=false",
+      "checkout",
+      "--detach",
+      superpowersCommit
+    ]);
     const revision = (await gitRunner(["-C", checkout, "rev-parse", "HEAD"])).stdout.trim();
     if (revision !== superpowersCommit) {
       throw new AgentFlowError(
@@ -540,6 +559,12 @@ async function externalSkillFiles(
         "EXTERNAL_SKILL_COMMIT_MISMATCH",
         { expectedCommit: superpowersCommit, actualCommit: revision }
       );
+    }
+    const parsedLock = skillLock(lockContent);
+    if (parsedLock.schemaVersion === 2) {
+      await validateSkillPolicyLock(parsedLock, {
+        skillsRoot: resolve(checkout, "skills")
+      });
     }
 
     const planned: PlannedFile[] = [];

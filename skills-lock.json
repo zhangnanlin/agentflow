@@ -1,10 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": "2026-07-15T20:15:00+08:00",
   "updatePolicy": "manual-review-only",
   "dependencies": [
     {
       "id": "obra-superpowers",
+      "organization": "obra",
       "repository": "https://github.com/obra/superpowers.git",
       "commit": "d884ae04edebef577e82ff7c4e143debd0bbec99",
       "license": "MIT",
@@ -14,8 +15,85 @@
         { "name": "brainstorming", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
         { "name": "writing-plans", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
         { "name": "executing-plans", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
-        { "name": "subagent-driven-development", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
-        { "name": "dispatching-parallel-agents", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
+        {
+          "name": "subagent-driven-development",
+          "activation": "orchestration",
+          "contentSha256": "9f3803b13a8b72a56c41f1ca5a27cf7e5ddd742ac2ab27105b76b61a03fab5b3",
+          "entrypoint": "SKILL.md",
+          "scriptScope": [
+            { "path": "scripts/review-package", "sha256": "0c0629f6e2c46fc8bf68dcfb8a247ab24eb548b7004fe494035e6fcba9b5cdfb" },
+            { "path": "scripts/sdd-workspace", "sha256": "9430befaff459ed862415b700c1a9efe45fd34838a684802a1d8320de0c3a007" },
+            { "path": "scripts/task-brief", "sha256": "5380283f00bffa99ab82ae78482b7d248abe10655129c72ca7050bdc0b6a85e1" }
+          ],
+          "toolScope": [
+            "filesystem.read",
+            "filesystem.write",
+            "git.read",
+            "git.write",
+            "host.worker.collect",
+            "host.worker.interrupt",
+            "host.worker.send",
+            "host.worker.spawn",
+            "host.worker.status",
+            "process.exec",
+            "test.run"
+          ],
+          "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" },
+          "approval": {
+            "status": "approved",
+            "reviewedBy": "agentflow-maintainers",
+            "reviewedAt": "2026-07-15"
+          },
+          "adapterCompatibility": ["codex", "cursor", "vscode"],
+          "restrictions": [
+            "core-safety-precedence",
+            "manual-updates-only",
+            "no-agentflow-mcp-in-worker",
+            "no-custom-model-process",
+            "no-supervisor-history"
+          ],
+          "policyRules": [
+            "compact-results",
+            "durable-progress",
+            "focused-task-briefs",
+            "fresh-context",
+            "isolated-worktrees"
+          ]
+        },
+        {
+          "name": "dispatching-parallel-agents",
+          "activation": "orchestration",
+          "contentSha256": "a49a390373a5bd33552fb724ddea72ac0bdf0fc8c15c422b505959277e0d9320",
+          "entrypoint": "SKILL.md",
+          "scriptScope": [],
+          "toolScope": [
+            "host.worker.collect",
+            "host.worker.spawn",
+            "host.worker.status"
+          ],
+          "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" },
+          "approval": {
+            "status": "approved",
+            "reviewedBy": "agentflow-maintainers",
+            "reviewedAt": "2026-07-15"
+          },
+          "adapterCompatibility": ["codex", "cursor", "vscode"],
+          "restrictions": [
+            "core-safety-precedence",
+            "manual-updates-only",
+            "no-agentflow-mcp-in-worker",
+            "no-custom-model-process",
+            "no-supervisor-history"
+          ],
+          "policyRules": [
+            "bounded-parallelism",
+            "compact-results",
+            "event-driven-collection",
+            "focused-task-briefs",
+            "fresh-context",
+            "isolated-worktrees"
+          ]
+        },
         { "name": "test-driven-development", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
         { "name": "requesting-code-review", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
         { "name": "receiving-code-review", "audits": { "agentTrustHub": "pass", "socket": "pass", "snyk": "pass" } },
@@ -26,6 +104,7 @@
     },
     {
       "id": "figma-mcp-server-guide",
+      "organization": "figma",
       "repository": "https://github.com/figma/mcp-server-guide.git",
       "commit": "07316dd2920d61303ca0e52812b31f5f341e7b15",
       "license": "Figma Developer Terms; no repository LICENSE at pinned commit",

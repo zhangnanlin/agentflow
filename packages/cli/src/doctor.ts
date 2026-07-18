@@ -24,6 +24,7 @@ import {
   type HostConfigurationSpec
 } from "./host-config.js";
 import { createEngine, type ProjectPaths } from "./runtime.js";
+import { validateSkillPolicyLock } from "./skill-policy.js";
 import type { GitRunner, SetupScope } from "./setup.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "needs_user" | "blocked";
@@ -329,10 +330,20 @@ async function inspectProject(paths: ProjectPaths): Promise<ProjectInspection> {
   };
 }
 
-async function inspectSkillLock(lockPath: string, checks: DoctorCheck[]): Promise<void> {
+async function inspectSkillLock(
+  lockPath: string,
+  skillsRoot: string,
+  host: HostClient | undefined,
+  checks: DoctorCheck[]
+): Promise<void> {
   try {
     const parsed = JSON.parse(await readFile(lockPath, "utf8")) as {
-      dependencies?: Array<{ id?: unknown; commit?: unknown; skills?: Array<{ name?: unknown }> }>;
+      schemaVersion?: unknown;
+      dependencies?: Array<{
+        id?: unknown;
+        commit?: unknown;
+        skills?: Array<{ name?: unknown; activation?: unknown }>;
+      }>;
     };
     const figma = parsed.dependencies?.find((dependency) => dependency.id === "figma-mcp-server-guide");
     const pinned = typeof figma?.commit === "string" && figma.commit.length === 40;
@@ -347,12 +358,80 @@ async function inspectSkillLock(lockPath: string, checks: DoctorCheck[]): Promis
         ? undefined
         : "Pin and review the official Figma MCP Server Guide before S04."
     ));
+    if (parsed.schemaVersion !== 2) {
+      checks.push(check(
+        "orchestration-skill-policy",
+        "warn",
+        `${lockPath} uses the legacy Skill lock and activates no content-addressed orchestration policy`,
+        "Review enabled orchestration Skills and update skills-lock.json to schemaVersion 2."
+      ));
+      return;
+    }
+    const activeSkillNames = (parsed.dependencies ?? []).flatMap((dependency) => (
+      dependency.skills ?? []
+    )).filter((skill) => (
+      isRecord(skill) && skill.activation === "orchestration" && typeof skill.name === "string"
+    )).map((skill) => skill.name as string);
+    if (activeSkillNames.some((name) => !/^[a-z0-9][a-z0-9-]*$/.test(name))) {
+      checks.push(check(
+        "orchestration-skill-policy",
+        "blocked",
+        "The reviewed orchestration Skill lock contains an unsafe Skill name",
+        "Remove the unsafe entry and approve a portable content-addressed Skill name."
+      ));
+      return;
+    }
+    const installed = await Promise.all(activeSkillNames.map((name) => (
+      pathExists(resolve(skillsRoot, name))
+    )));
+    if (activeSkillNames.length > 0 && installed.every((value) => !value)) {
+      checks.push(check(
+        "orchestration-skill-policy",
+        "warn",
+        `${activeSkillNames.length} reviewed orchestration Skill policies are locked but not installed`,
+        "Run setup without --skip-external-skills only when the pinned external Skills are required."
+      ));
+      return;
+    }
+    if (installed.some((value) => !value)) {
+      checks.push(check(
+        "orchestration-skill-policy",
+        "blocked",
+        "The reviewed orchestration Skill installation is incomplete",
+        "Restore every pinned Skill from the same immutable lock revision before activation."
+      ));
+      return;
+    }
+    try {
+      const catalog = await validateSkillPolicyLock(parsed, {
+        skillsRoot,
+        ...(host === undefined ? {} : { host })
+      });
+      checks.push(check(
+        "orchestration-skill-policy",
+        "ok",
+        `${catalog.policies.length} enabled orchestration Skill policies match reviewed local content`
+      ));
+    } catch (error) {
+      checks.push(check(
+        "orchestration-skill-policy",
+        "blocked",
+        `Enabled orchestration Skill policy is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        "Restore the reviewed local Skill bytes or approve a new immutable lock entry; do not auto-update from the network."
+      ));
+    }
   } catch (error) {
     checks.push(check(
       "figma-skill-lock",
       "warn",
       `Cannot inspect ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
       "Install a reviewed skills-lock.json before using external Figma Skills."
+    ));
+    checks.push(check(
+      "orchestration-skill-policy",
+      "blocked",
+      `Cannot validate orchestration Skill policy at ${lockPath}`,
+      "Install a valid reviewed skills-lock.json; do not activate untracked external Skills."
     ));
   }
 }
@@ -476,7 +555,12 @@ async function inspectProjectInstallation(
     );
   }
 
-  await inspectSkillLock(resolve(paths.projectRoot, "skills-lock.json"), checks);
+  await inspectSkillLock(
+    resolve(paths.projectRoot, "skills-lock.json"),
+    resolve(paths.projectRoot, ".agents", "skills"),
+    host,
+    checks
+  );
   if (host) {
     const spec = durableHostConfigurationSpec(host, paths.projectRoot);
     const plan = planHostConfiguration(spec);
@@ -559,7 +643,7 @@ async function inspectGlobalInstallation(
     },
     "Run global agentflow setup again to restore install metadata."
   );
-  await inspectSkillLock(paths.skillsLock, checks);
+  await inspectSkillLock(paths.skillsLock, paths.skillsRoot, host, checks);
 
   if (host) {
     const spec: HostConfigurationSpec = {

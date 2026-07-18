@@ -175,6 +175,72 @@ describe("doctor capability normalization", () => {
     expect(report.project.status).toBe("not-initialized");
   });
 
+  it("blocks an enabled orchestration Skill when installed bytes do not match its review", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentflow-doctor-skill-policy-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectRoot = join(root, "project");
+    await Promise.all([mkdir(home, { recursive: true }), mkdir(projectRoot, { recursive: true })]);
+    const assets = await setupAssets(root);
+    await writeFile(assets.skillsLockPath, JSON.stringify({
+      schemaVersion: 2,
+      updatePolicy: "manual-review-only",
+      dependencies: [{
+        id: "reviewed-rules",
+        organization: "reviewed",
+        repository: "https://github.com/reviewed/rules.git",
+        commit: "a".repeat(40),
+        license: "MIT",
+        sourceMode: "external-host",
+        reviewedAt: "2026-07-15",
+        skills: [{
+          name: "parallel-rules",
+          activation: "orchestration",
+          contentSha256: "0".repeat(64),
+          entrypoint: "SKILL.md",
+          scriptScope: [],
+          toolScope: ["host.worker.spawn"],
+          audits: { socket: "pass" },
+          approval: {
+            status: "approved",
+            reviewedBy: "agentflow-maintainers",
+            reviewedAt: "2026-07-15"
+          },
+          adapterCompatibility: ["codex"],
+          restrictions: ["core-safety-precedence", "manual-updates-only"],
+          policyRules: ["fresh-context"]
+        }]
+      }]
+    }));
+    const environment = isolatedGlobalEnvironment(home);
+    await executeSetup({
+      projectRoot,
+      scope: "global",
+      hosts: ["codex"],
+      assets,
+      skipExternalSkills: true
+    }, { globalPathEnvironment: environment, distributionVersion: "0.3.0" });
+    const skillRoot = join(home, ".agents", "skills", "parallel-rules");
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(join(skillRoot, "SKILL.md"), "reviewed locally\n");
+
+    const report = await runDoctor({
+      paths: projectPaths(projectRoot),
+      scope: "global",
+      host: "codex",
+      globalPathEnvironment: environment
+    });
+
+    expect(report.ok).toBe(false);
+    expect(report.installation.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "orchestration-skill-policy",
+        status: "blocked",
+        detail: expect.stringContaining("content SHA-256")
+      })
+    ]));
+  });
+
   it("marks an initialized project valid and malformed project state invalid", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentflow-doctor-project-state-"));
     temporaryDirectories.push(root);
