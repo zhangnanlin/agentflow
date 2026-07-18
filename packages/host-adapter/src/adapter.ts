@@ -14,7 +14,11 @@ export type ThreadAdapterErrorCode =
   | "WORKER_NOT_TERMINAL"
   | "WORKER_RESULT_INVALID"
   | "TASK_NOT_DISPATCHABLE"
-  | "WORKSPACE_INVALID";
+  | "WORKSPACE_INVALID"
+  | "CONTEXT_INHERITANCE_DETECTED"
+  | "RESULT_NOT_PERSISTED"
+  | "CLEANUP_ORDER_INVALID"
+  | "SUPERVISOR_TASK_PROTECTED";
 
 export class ThreadAdapterError extends Error {
   constructor(

@@ -2,6 +2,7 @@ import { isAbsolute, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildCodexDispatchInput,
+  CodexNativeWorkerAdapter,
   CodexThreadAdapter,
   hashWorkerPrompt,
   ThreadAdapterError,
@@ -10,6 +11,11 @@ import {
   type CodexThreadClient,
   type SpawnWorkerInput
 } from "../src/index.js";
+import { nativeAdapterConformance } from "./native-conformance.js";
+
+nativeAdapterConformance("codex", true, (host, budget) => (
+  new CodexNativeWorkerAdapter(host, { budget })
+));
 
 const hash = "a".repeat(64);
 
