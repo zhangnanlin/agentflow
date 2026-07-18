@@ -51,7 +51,8 @@ const expectedToolNames = [
   "worker_interrupt",
   "worker_observe",
   "worker_prepare",
-  "worker_status"
+  "worker_status",
+  "workflow_escalate"
 ];
 const packagedSkillNames = [
   "agentflow-architecture",
@@ -220,6 +221,7 @@ describe("standalone AgentFlow distribution", () => {
       routerSkill,
       routingContract,
       orchestratorSkill,
+      codexHostBridgeSkill,
       releaseGateSkill,
       completionSkill
     ] = await Promise.all([
@@ -230,6 +232,7 @@ describe("standalone AgentFlow distribution", () => {
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-auto-router/references/routing-contract.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-orchestrator/SKILL.md"), "utf8"),
+      readFile(resolve(repositoryRoot, ".agents/skills/agentflow-codex-host-bridge/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-release-gate/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-completion-verifier/SKILL.md"), "utf8")
     ]);
@@ -289,6 +292,13 @@ describe("standalone AgentFlow distribution", () => {
     expect(routingContract).toContain("run_start_or_resume");
     expect(orchestratorSkill).toContain("per-call project");
     expect(orchestratorSkill).toContain("run_start_or_resume");
+    expect(routerSkill).toContain("agentflow:full");
+    expect(orchestratorSkill).toContain("workflow_escalate");
+    expect(orchestratorSkill).toContain("zero inherited conversation turns");
+    expect(orchestratorSkill).toContain("continue its own Task");
+    expect(codexHostBridgeSkill).toContain("inheritedTurnCount: 0");
+    expect(codexHostBridgeSkill).toContain("worker_cleanup_record");
+    expect(codexHostBridgeSkill).toContain("Agent CLI process");
     expect(releaseGateSkill).toContain("source-control");
     expect(releaseGateSkill).toContain("immediate remote-ref verification");
     expect(releaseGateSkill).toContain("does not require a model Worker");
@@ -554,10 +564,15 @@ describe("standalone AgentFlow distribution", () => {
         "utf8"
       )).toContain("structured_choice_request");
     }
-    expect(await readFile(
-      join(home, ".agents", "skills", "agentflow-codex-host-bridge", "SKILL.md"),
-      "utf8"
-    )).toContain("host.user-input.structured");
+    const [installedRouter, installedOrchestrator, installedCodexBridge] = await Promise.all([
+      readFile(join(home, ".agents", "skills", "agentflow-auto-router", "SKILL.md"), "utf8"),
+      readFile(join(home, ".agents", "skills", "agentflow-orchestrator", "SKILL.md"), "utf8"),
+      readFile(join(home, ".agents", "skills", "agentflow-codex-host-bridge", "SKILL.md"), "utf8")
+    ]);
+    expect(installedRouter).toContain("agentflow:full");
+    expect(installedOrchestrator).toContain("workflow_escalate");
+    expect(installedCodexBridge).toContain("host.user-input.structured");
+    expect(installedCodexBridge).toContain("worker_cleanup_record");
 
     const manifest = JSON.parse(await readFile(join(runtimeRoot, "install.json"), "utf8")) as {
       version: string;

@@ -151,7 +151,8 @@ describe("AgentFlow MCP server", () => {
       "worker_interrupt",
       "worker_observe",
       "worker_prepare",
-      "worker_status"
+      "worker_status",
+      "workflow_escalate"
     ]);
     const taskCreateSchema = tools.tools.find((tool) => tool.name === "task_create")?.inputSchema as {
       required?: string[];
@@ -427,6 +428,32 @@ describe("AgentFlow MCP server", () => {
         id: "next-mcp-run",
         workflow: { lane: "quick", signals: ["low-risk"] }
       }
+    });
+
+    const escalated = await call(connectedClient, "workflow_escalate", {
+      signals: ["migration"],
+      ...mutation(0, "escalate-next-run", "supervisor-1", "next-mcp-run")
+    });
+    expect(escalated.structuredContent).toMatchObject({
+      revision: 1,
+      workflow: {
+        lane: "full",
+        signals: ["low-risk", "migration"],
+        escalations: [{ from: "quick", to: "full", signals: ["migration"] }]
+      }
+    });
+
+    const failed = await call(connectedClient, "run_fail", {
+      ...mutation(1, "fail-next-run", "supervisor-1", "next-mcp-run")
+    });
+    expect(failed.structuredContent).toMatchObject({ revision: 2, status: "failed" });
+    const terminalEscalation = await call(connectedClient, "workflow_escalate", {
+      signals: ["release"],
+      ...mutation(2, "reject-terminal-escalation", "supervisor-1", "next-mcp-run")
+    });
+    expect(terminalEscalation).toMatchObject({
+      isError: true,
+      structuredContent: { error: "RUN_TERMINAL" }
     });
   });
 

@@ -10,6 +10,7 @@ import {
   projectChangeReceipt,
   projectRunSection,
   projectRunSummary,
+  RoutingSignalSchema,
   validateArtifactPayload,
   sha256,
   ThreadCapabilitiesSchema,
@@ -342,6 +343,26 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
           initialized: result.initialized,
           summary: boundedRunSummary(result.state)
         };
+  }));
+
+  server.registerTool("workflow_escalate", {
+    title: "Escalate AgentFlow workflow",
+    description: "Persist later risk evidence and move an active Run to a higher workflow lane without permitting downgrade.",
+    inputSchema: {
+      ...mutationShape,
+      signals: z.array(RoutingSignalSchema).min(1).max(16)
+    }
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    if (target.state.executionStatus === "terminal") {
+      throw new AgentFlowError(`Run is already terminal: ${target.runId}`, "RUN_TERMINAL", {
+        runId: target.runId,
+        status: target.state.status
+      });
+    }
+    return mutationOutput(input, target.state, () => (
+      target.engine.escalateRunWorkflow(target.runId, input.signals, target.context)
+    ));
   }));
 
   server.registerTool("run_cancel", {

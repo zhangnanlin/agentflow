@@ -1,6 +1,6 @@
 ---
 name: agentflow-auto-router
-description: Route every project-changing request into AgentFlow while bypassing pure questions, code explanation, read-only inspection, status lookup, and simple non-mutating commands. Use before editing a project, honor one-request agentflow:on and agentflow:off overrides, resume unfinished Runs, and preserve all human Gates.
+description: Route every project-changing request into AgentFlow while bypassing pure questions, code explanation, read-only inspection, status lookup, and simple non-mutating commands. Use before editing a project, honor one-request agentflow:on, agentflow:off, and agentflow:full overrides, resume unfinished Runs, and preserve all human Gates.
 ---
 
 # AgentFlow Auto Router
@@ -12,6 +12,7 @@ Classify the user's requested outcome before changing the project. Route qualify
 1. Check the current request for an explicit one-request override.
    - `agentflow:on` forces AgentFlow routing.
    - `agentflow:off` bypasses AgentFlow routing.
+   - `agentflow:full` routes the request through the complete Full lane. Preserve the token in the original requirement so `run_start_or_resume` records the override.
 2. Without an override, route every project-changing request. This includes new projects, features, bug fixes, refactors, tests, documentation edits, configuration changes, migrations, design work, package publication, and deployment.
 3. Bypass AgentFlow for pure questions, code explanation, read-only inspection, status lookup, simple non-mutating commands, and a safe source-control sync that only pushes existing commits or tags without file changes.
 4. Treat force push, ref deletion, history rewriting, release creation, package publication, deployment, migration, and any request with file changes as project-changing even when Git is also mentioned.
@@ -24,8 +25,9 @@ Read [references/routing-contract.md](references/routing-contract.md) when the r
 1. Resolve the project for this request. When the host exposes multiple workspace roots, pass the intended absolute `projectRoot` on this and every later AgentFlow MCP call. Never guess a root or store a mutable global current project.
 2. Call `run_start_or_resume` before any other AgentFlow state mutation. Pass the user's original requirement, the new/existing project classification, the UI classification, and a stable request key. This is the only tool allowed to initialize a missing project.
 3. Treat the returned project root and Run state as authoritative. Continue the returned unfinished Run rather than creating a duplicate; use the same explicit root for `pipeline_get`, `status_get`, and all later tools.
-4. Load `agentflow-orchestrator` and let it coordinate the active Stage, bounded Workers, verified Artifacts, and human Gates.
-5. Preserve every human Gate. Never infer approval from silence or from a previous, unrelated approval.
+4. Read the persisted workflow lane, policy version, matched signals, and explanation. Do not replace the deterministic Core decision with a free-form lane choice.
+5. Load `agentflow-orchestrator` and let it coordinate the active Stage, bounded Workers, verified Artifacts, and human Gates.
+6. Preserve every human Gate. Never infer approval from silence or from a previous, unrelated approval.
 
 ## Reduce User Input
 

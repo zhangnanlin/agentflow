@@ -7,9 +7,10 @@ Use the current host's equivalent operation when names differ. Never substitute 
 | `spawn` | Spawn a subagent/background task with a bounded prompt | `worker_dispatch_prepare`, native spawn, then `worker_bind` |
 | `send` | Send a message to a running Worker; use follow-up for an idle Worker | No status change; retain an audit summary outside raw prompt logs |
 | `status` | List or inspect native Workers | `worker_observe` for non-terminal state |
-| `collect` | Wait for and read the terminal structured result | `worker_collect` |
+| `collect` | One event-driven wait for and read of the terminal structured result | `worker_collect` |
 | `interrupt` | Interrupt the native Worker | `worker_interrupt` after confirmation |
-| `close` | Often unavailable for Codex subagents | Keep false; do not simulate it |
+| `close` | Close native execution when exposed | Record the confirmed close in `worker_cleanup_record` |
+| `archive` | Archive/remove a completed Codex child task when exposed | Record the confirmed archive in `worker_cleanup_record` |
 
 ## Structured User Input
 
@@ -22,9 +23,11 @@ For a bound live Worker, never substitute `task_complete` for `worker_collect`. 
 - Prefer the native collaboration/subagent API for internal Worker Tasks.
 - Do not create a user-owned top-level Codex task unless the user explicitly requested one.
 - Use an exact task name such as `af_<run>_<task>_<worker>`, normalized to lowercase letters, digits, and underscores.
-- Pass no inherited turns when possible. The AgentFlow dispatch envelope must contain the necessary context.
+- Require a fresh native task with exactly zero inherited turns. If the host cannot attest this, do not dispatch and use inline or serial Supervisor execution.
 - Bind the stable native agent/thread identifier, not a display title.
+- Bind the complete native v2 handle and require an enforced tool allowlist with AgentFlow MCP disabled.
 - Use list/inspect by ID after binding; use the exact task name only to recover a prepared-but-unbound dispatch.
+- While native Workers run, keep executing the Supervisor-owned Task for the same independent wave; do not spend repeated model turns polling.
 
 ## Recovery Decisions
 
@@ -40,7 +43,9 @@ For a bound live Worker, never substitute `task_complete` for `worker_collect`. 
 | live Worker | native interruption confirmed | record the interruption; redispatch only after AgentFlow readies the Task |
 | Task appears terminal, Worker is live | any | inspect by bound ID; call `worker_fail` or `worker_interrupt` only after the corresponding failure or interruption is confirmed, and stop for state reconciliation without completing the Stage if a valid result cannot be collected from the non-running Task |
 | claimed setup, no Worker | worktree creation or prepare failed | preserve the error and call `task_setup_abort` |
-| terminal | any | do not redispatch |
+| terminal result collected, cleanup pending | native task found | close, archive when supported, release its permit, then persist the exact `worker_cleanup_record` receipt |
+| terminal result collected, cleanup pending | native operation unsupported | persist `unsupported`; never fabricate success or redispatch |
+| terminal and cleanup complete | any | do not redispatch |
 
 When the lease is near expiry, heartbeat only after confirming that the bound native Worker still exists and owns the same Task.
-Before `stage_complete`, reload AgentFlow status and require no `prepared`, `starting`, `running`, or `unknown` Worker whose Task belongs to the Stage.
+Before `stage_complete`, reload AgentFlow status, require no `prepared`, `starting`, `running`, or `unknown` Worker whose Task belongs to the Stage, and reconcile every supported pending cleanup step.

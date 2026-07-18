@@ -6,6 +6,8 @@ Read this reference before dispatching or collecting a Worker.
 
 Provide every field below. Keep context bounded and pass Artifact URIs plus hashes instead of entire documents when possible.
 
+The native task starts with zero inherited conversation turns. The envelope is the complete context boundary; never attach the Supervisor transcript or full Run state. The Worker tool profile is an enforced allowlist and excludes AgentFlow MCP and nested-agent tools.
+
 ```json
 {
   "runId": "run-id",
@@ -67,6 +69,8 @@ Treat `prepared`, `starting`, `running`, and `unknown` as live Worker statuses. 
 
 Direct `task_complete` remains legal only for a claimed Task with no persisted live Worker. Before `stage_complete`, reload status and require that no Worker whose Task belongs to the Stage has a live status.
 
+After one of those terminal paths is durable, run native cleanup in order: close execution, archive the child task when supported, and release the exact permit. Persist the adapter's host-, version-, Worker-, and native-ID-bound receipt with `worker_cleanup_record`. A failed or unsupported cleanup step stays explicit; it is not permission to invent success or redispatch collected work.
+
 ## Native Host Mapping
 
 Map the contract to native thread operations through the Host Adapter:
@@ -79,5 +83,6 @@ Map the contract to native thread operations through the Host Adapter:
 | `collect` | Read and validate the terminal structured result |
 | `interrupt` | Stop native work when supported |
 | `close` | Archive or close the Worker when supported |
+| `archive` | Remove the completed child task from the host task list when supported |
 
 If a capability is false, declare the degraded behavior. Never report a correction, interrupt, or close as successful unless the host confirmed it.
