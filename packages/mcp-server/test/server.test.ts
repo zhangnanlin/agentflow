@@ -457,6 +457,68 @@ describe("AgentFlow MCP server", () => {
     });
   });
 
+  it("rejects the legacy arbitrary-prompt Worker path for adaptive Runs", async () => {
+    await client?.close();
+    await server?.close();
+    client = undefined;
+    server = undefined;
+
+    const adaptiveRoot = join(directory, "adaptive-worker-project");
+    await mkdir(adaptiveRoot, { recursive: true });
+    server = createAgentFlowMcpServer({ projectRoot: adaptiveRoot, defaultResponseProfile: "full" });
+    client = new Client({ name: "agentflow-adaptive-worker-test", version: "0.1.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const connectedClient = requireClient(client);
+
+    let result = await call(connectedClient, "run_start_or_resume", {
+      requirement: "Make one low-risk code change",
+      projectType: "existing",
+      hasUi: false,
+      requestedRunId: "adaptive-worker-run",
+      requestKey: "adaptive-worker-start"
+    });
+    expect(result.structuredContent).toMatchObject({
+      state: { workflow: { lane: "quick" }, activeStageId: "S00" }
+    });
+    result = await call(connectedClient, "task_create", {
+      taskId: "adaptive-task",
+      stageId: "S00",
+      title: "Prepare safely",
+      ...mutation(0, "adaptive-create", "supervisor", "adaptive-worker-run")
+    });
+    result = await call(connectedClient, "task_claim", {
+      taskId: "adaptive-task",
+      workerId: "legacy-worker",
+      leaseSeconds: 900,
+      ...mutation(1, "adaptive-legacy-claim", "legacy-worker", "adaptive-worker-run")
+    });
+    expect(runState(result).tasks["adaptive-task"]?.status).toBe("running");
+
+    result = await call(connectedClient, "worker_prepare", {
+      workerId: "legacy-worker",
+      taskId: "adaptive-task",
+      adapter: "codex",
+      hostTaskName: "adaptive_legacy_worker",
+      prompt: "Supervisor conversation history should never enter an adaptive Worker.",
+      capabilities: {
+        spawn: true,
+        send: true,
+        status: true,
+        collect: true,
+        interrupt: true,
+        close: true
+      },
+      ...mutation(2, "reject-adaptive-legacy-prepare", "supervisor", "adaptive-worker-run")
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_V2_DISPATCH_REQUIRED" }
+    });
+    expect(runState(await call(connectedClient, "status_get", { runId: "adaptive-worker-run" })).workers).toEqual({});
+  });
+
   it("atomically prepares a deterministic native dispatch and replays it without duplicate spawn intent", async () => {
     const connectedClient = requireClient(client);
     const verificationCommand = "node -e \"const p=require('./package.json');if(p.name!=='agentflow')process.exit(1)\"";
@@ -520,13 +582,13 @@ describe("AgentFlow MCP server", () => {
     const prepared = result.structuredContent as unknown as {
       revision: number;
       task: { status: string; workspace: { kind: string; path: string } };
-      worker: { status: string; promptHash: string; hostTaskName: string };
+      worker: { status: string; protocolVersion: number; promptHash: string; hostTaskName: string };
       dispatch: { taskName: string; prompt: string; promptHash: string; workspace: { path: string } };
     };
     expect(prepared).toMatchObject({
       revision: 2,
       task: { status: "running", workspace: { kind: "project", path: directory } },
-      worker: { status: "prepared" },
+      worker: { status: "prepared", protocolVersion: 2 },
       dispatch: { workspace: { path: directory } }
     });
     expect(prepared.dispatch.taskName).toMatch(/^[a-z0-9_]{1,100}$/);
@@ -554,9 +616,78 @@ describe("AgentFlow MCP server", () => {
     expect((replay.structuredContent as { dispatch?: { promptHash?: string } }).dispatch?.promptHash)
       .toBe(prepared.dispatch.promptHash);
 
+    const missingNativeHandle = await call(connectedClient, "worker_bind", {
+      workerId: "dispatch-worker",
+      externalThreadId: "codex-native-thread-1",
+      ...mutation(2, "reject-bind-without-v2-handle", "supervisor-1")
+    });
+    expect(missingNativeHandle).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_NATIVE_HANDLE_REQUIRED" }
+    });
+
+    const handleAt = new Date().toISOString();
+    const nativeHandle = {
+      version: 2,
+      host: "codex",
+      adapterVersion: "2.0.0",
+      workerId: "dispatch-worker",
+      taskId: "dispatch-task",
+      nativeId: "codex-native-thread-1",
+      taskName: prepared.dispatch.taskName,
+      status: "starting",
+      promptHash: prepared.dispatch.promptHash,
+      promptBytes: Buffer.byteLength(prepared.dispatch.prompt, "utf8"),
+      contextPolicy: {
+        mode: "fresh-attested",
+        inheritedTurnCountObservable: true,
+        inheritedTurnCount: 0
+      },
+      toolProfile: {
+        mode: "allowlist",
+        enforced: true,
+        tools: ["read_file", "apply_patch"],
+        agentflowMcpEnabled: false
+      },
+      capabilities: {
+        spawnFresh: "supported",
+        bind: "supported",
+        send: "supported",
+        status: "supported",
+        waitAny: "supported",
+        collect: "supported",
+        interrupt: "supported",
+        close: "supported",
+        archive: "supported"
+      },
+      permitId: "00000000-0000-4000-8000-000000000002",
+      permitOwnerId: "dispatch-worker-owner",
+      cleanup: {
+        close: { status: "pending" },
+        archive: { status: "pending" },
+        permitRelease: { status: "pending" }
+      },
+      createdAt: handleAt,
+      updatedAt: handleAt
+    } as const;
+    const nestedAgentHandle = await call(connectedClient, "worker_bind", {
+      workerId: "dispatch-worker",
+      externalThreadId: "codex-native-thread-1",
+      nativeHandle: {
+        ...nativeHandle,
+        toolProfile: { ...nativeHandle.toolProfile, tools: ["read_file", "spawn_agent"] }
+      },
+      ...mutation(2, "reject-nested-agent-handle", "supervisor-1")
+    });
+    expect(nestedAgentHandle).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_CONTEXT_ISOLATION_INVALID" }
+    });
+
     result = await call(connectedClient, "worker_bind", {
       workerId: "dispatch-worker",
       externalThreadId: "codex-native-thread-1",
+      nativeHandle,
       ...mutation(2, "bind-dispatch-worker", "supervisor-1")
     });
     expect(runState(result).workers["dispatch-worker"]).toMatchObject({
@@ -635,6 +766,50 @@ describe("AgentFlow MCP server", () => {
       tasks: { "dispatch-task": { status: "completed" } },
       workers: { "dispatch-worker": { status: "completed" } }
     });
+  });
+
+  it("rejects an oversized deterministic Worker prompt before mutating state", async () => {
+    const connectedClient = requireClient(client);
+    let result = await call(connectedClient, "task_create", {
+      taskId: "oversized-dispatch-task",
+      stageId: "S0",
+      title: "Reject an oversized envelope",
+      description: "x".repeat(18_000),
+      profile: "analysis",
+      writeScopes: [],
+      forbiddenScopes: [".agentflow/**"],
+      acceptanceCriteria: ["The oversized prompt is rejected"],
+      verificationCommands: ["npm test"],
+      expectedOutputs: ["No prepared Worker"],
+      requiresWorktree: false,
+      ...mutation(0, "create-oversized-dispatch-task", "supervisor-1")
+    });
+    expect(runState(result).revision).toBe(1);
+
+    result = await call(connectedClient, "worker_dispatch_prepare", {
+      taskId: "oversized-dispatch-task",
+      workerId: "oversized-dispatch-worker",
+      adapter: "codex",
+      leaseSeconds: 900,
+      capabilities: {
+        spawn: true,
+        send: true,
+        status: true,
+        collect: true,
+        interrupt: true,
+        close: true
+      },
+      ...mutation(1, "reject-oversized-dispatch", "supervisor-1")
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_PROMPT_TOO_LARGE" }
+    });
+
+    const persisted = runState(await call(connectedClient, "status_get"));
+    expect(persisted.revision).toBe(1);
+    expect(persisted.tasks["oversized-dispatch-task"]?.status).toBe("ready");
+    expect(persisted.workers).toEqual({});
   });
 
   it("verifies a completed worktree change set against real Git history before collection", async () => {
@@ -732,6 +907,12 @@ describe("AgentFlow MCP server", () => {
     result = await call(connectedClient, "worker_bind", {
       workerId: "worker-git",
       externalThreadId: "codex-git-thread",
+      nativeHandle: nativeHandleForDispatch(
+        replayAfterCommit.structuredContent,
+        "worker-git",
+        "task-git",
+        "codex-git-thread"
+      ),
       ...mutation(2, "git-bind-worker", "supervisor-1")
     });
     expect(runState(result).revision).toBe(3);
@@ -1549,63 +1730,46 @@ describe("AgentFlow MCP server", () => {
     });
 
     const lineageEngine = new AgentFlowEngine(new JsonRunStore(projectPaths(directory).runsDirectory), pipeline);
-    state = await lineageEngine.prepareTaskDispatch(state.id, {
-      workerId: "worker-service",
+    state = await lineageEngine.claimInlineTask(state.id, {
       taskId: "task-service",
-      adapter: "codex",
-      hostTaskName: "lineage_service_worker",
-      promptHash: "c".repeat(64),
-      capabilities: {
-        spawn: true,
-        send: true,
-        status: true,
-        collect: true,
-        interrupt: true,
-        close: false
-      },
       leaseSeconds: 900,
       workspace: { kind: "project", path: directory }
     }, {
       expectedRevision: state.revision,
-      idempotencyKey: "lineage-prepare-service",
+      idempotencyKey: "lineage-claim-service-inline",
       actor: { id: "supervisor-1", kind: "supervisor" },
-      reason: "Prepare the materialized lineage Task."
-    });
-    state = await lineageEngine.bindWorker(state.id, "worker-service", "codex-lineage-service", {
-      expectedRevision: state.revision,
-      idempotencyKey: "lineage-bind-service",
-      actor: { id: "supervisor-1", kind: "supervisor" },
-      reason: "Bind the lineage Task to a native identity."
+      reason: "Execute the single-Task implementation wave in the Supervisor."
     });
     const serviceRevision = sha256("service-revision");
     const serviceCompletedAt = new Date().toISOString();
-    state = await lineageEngine.collectWorkerResult(state.id, "worker-service", {
-      workerId: "worker-service",
+    state = await lineageEngine.completeInlineTask(state.id, {
       taskId: "task-service",
-      status: "completed",
-      summary: "Implemented the project service.",
-      artifacts: [],
-      changeSet: {
-        kind: "git-commits",
-        baseRevision: implementationPlan.repository.baseRevision,
-        headRevision: serviceRevision,
-        revisions: [serviceRevision],
-        changedPaths: ["packages/service/src/projects/index.ts"]
-      },
-      verification: [{
-        command: "npm test -- project-service",
-        status: "passed",
-        summary: "Project service tests passed",
-        recordedAt: serviceCompletedAt
-      }],
-      risks: [],
-      followUps: [],
-      completedAt: serviceCompletedAt
+      workspace: { kind: "project", path: directory },
+      result: {
+        summary: "Implemented the project service in the Supervisor.",
+        artifacts: [],
+        changeSet: {
+          kind: "git-commits",
+          baseRevision: implementationPlan.repository.baseRevision,
+          headRevision: serviceRevision,
+          revisions: [serviceRevision],
+          changedPaths: ["packages/service/src/projects/index.ts"]
+        },
+        verification: [{
+          command: "npm test -- project-service",
+          status: "passed",
+          summary: "Project service tests passed",
+          recordedAt: serviceCompletedAt
+        }],
+        risks: [],
+        followUps: [],
+        completedAt: serviceCompletedAt
+      }
     }, {
       expectedRevision: state.revision,
-      idempotencyKey: "lineage-collect-service",
+      idempotencyKey: "lineage-complete-service-inline",
       actor: { id: "supervisor-1", kind: "supervisor" },
-      reason: "Collect the immutable service revision."
+      reason: "Record the Supervisor's immutable service revision."
     });
 
     const integrationReport = integrationReportPayload(implementationPlanHash, planBaseRevision);
@@ -2132,6 +2296,65 @@ function mutation(
     idempotencyKey,
     actorId,
     reason: `contract test: ${idempotencyKey}`
+  };
+}
+
+function nativeHandleForDispatch(
+  structuredContent: unknown,
+  workerId: string,
+  taskId: string,
+  nativeId: string
+) {
+  const prepared = structuredContent as {
+    dispatch?: { taskName?: string; prompt?: string; promptHash?: string };
+  };
+  const dispatch = prepared.dispatch;
+  if (!dispatch?.taskName || !dispatch.prompt || !dispatch.promptHash) {
+    throw new Error("Prepared dispatch is incomplete");
+  }
+  const at = new Date().toISOString();
+  return {
+    version: 2 as const,
+    host: "codex" as const,
+    adapterVersion: "2.0.0",
+    workerId,
+    taskId,
+    nativeId,
+    taskName: dispatch.taskName,
+    status: "starting" as const,
+    promptHash: dispatch.promptHash,
+    promptBytes: Buffer.byteLength(dispatch.prompt, "utf8"),
+    contextPolicy: {
+      mode: "fresh-attested" as const,
+      inheritedTurnCountObservable: true,
+      inheritedTurnCount: 0
+    },
+    toolProfile: {
+      mode: "allowlist" as const,
+      enforced: true,
+      tools: ["read_file", "apply_patch"],
+      agentflowMcpEnabled: false
+    },
+    capabilities: {
+      spawnFresh: "supported" as const,
+      bind: "supported" as const,
+      send: "supported" as const,
+      status: "supported" as const,
+      waitAny: "supported" as const,
+      collect: "supported" as const,
+      interrupt: "supported" as const,
+      close: "supported" as const,
+      archive: "supported" as const
+    },
+    permitId: "00000000-0000-4000-8000-000000000003",
+    permitOwnerId: `${workerId}-owner`,
+    cleanup: {
+      close: { status: "pending" as const },
+      archive: { status: "pending" as const },
+      permitRelease: { status: "pending" as const }
+    },
+    createdAt: at,
+    updatedAt: at
   };
 }
 

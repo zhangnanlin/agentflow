@@ -208,6 +208,7 @@ export const WorkerSchema = z.object({
   id: IdSchema,
   taskId: IdSchema,
   adapter: IdSchema,
+  protocolVersion: z.union([z.literal(1), z.literal(2)]).default(1),
   adapterVersion: z.string().min(1).max(64).default("1"),
   hostTaskName: z.string().min(1).max(200),
   promptHash: Sha256Schema,

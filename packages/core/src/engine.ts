@@ -104,6 +104,7 @@ export interface PrepareWorkerInput {
   workerId: string;
   taskId: string;
   adapter: string;
+  protocolVersion?: 1 | 2;
   hostTaskName: string;
   promptHash: string;
   capabilities: ThreadCapabilities;
@@ -736,6 +737,7 @@ export class AgentFlowEngine {
       const workspace = TaskWorkspaceSchema.parse({ ...input.workspace, boundAt: now });
       const task = state.tasks[input.taskId];
       invariant(task, `Task not found: ${input.taskId}`, "TASK_NOT_FOUND");
+      this.assertSupervisorWaveParticipation(state, task);
       if (task.planRepository && workspace.kind === "worktree") {
         invariant(
           workspace.baseRevision === task.planRepository.baseRevision
@@ -779,7 +781,7 @@ export class AgentFlowEngine {
         : this.claimTaskState(state, input.taskId, input.workerId, input.leaseSeconds, now);
       claimed.ownerKind = "worker";
       claimed.workspace = workspace;
-      this.prepareWorkerState(state, input, now);
+      this.prepareWorkerState(state, { ...input, protocolVersion: 2 }, now);
       if (!alreadyClaimed) {
         this.event(state, "task.claimed", context.actor, now, {
           taskId: input.taskId,
@@ -1150,7 +1152,14 @@ export class AgentFlowEngine {
       invariant(worker, `Worker not found: ${workerId}`, "WORKER_NOT_FOUND");
       invariant(isLiveWorker(worker.status), `Worker is already terminal: ${worker.status}`, "WORKER_TERMINAL");
       worker.status = "failed";
-      worker.cleanup ??= this.initialWorkerCleanup(worker.capabilities.close);
+      worker.cleanup ??= worker.externalThreadId === undefined
+        ? {
+            close: { status: "unsupported", reason: "No native Worker was bound" },
+            archive: { status: "unsupported", reason: "No native Worker was bound" },
+            permitRelease: { status: "unsupported", reason: "No bound Worker permit exists" },
+            completedAt: now
+          }
+        : this.initialWorkerCleanup(worker.capabilities.close);
       worker.updatedAt = now;
       const task = state.tasks[worker.taskId];
       if (task?.status === "running" && task.owner === workerId) {
@@ -1660,6 +1669,20 @@ export class AgentFlowEngine {
           workerStatus: liveWorker?.status
         }
       );
+      const pendingCleanupWorkerId = pendingTerminalCleanup(state)
+        .find((workerId) => taskIds.has(state.workers[workerId]?.taskId ?? ""));
+      invariant(
+        pendingCleanupWorkerId === undefined,
+        `Stage still has pending terminal Worker cleanup: ${stageId}`,
+        "STAGE_WORKER_CLEANUP_PENDING",
+        {
+          stageId,
+          workerId: pendingCleanupWorkerId,
+          taskId: pendingCleanupWorkerId === undefined
+            ? undefined
+            : state.workers[pendingCleanupWorkerId]?.taskId
+        }
+      );
       invariant(tasks.every((task) => task.status === "completed" || task.status === "cancelled"), "Stage has incomplete tasks", "STAGE_TASKS_INCOMPLETE");
 
       const artifactKinds = new Set(
@@ -2121,6 +2144,7 @@ export class AgentFlowEngine {
       id: input.workerId,
       taskId: input.taskId,
       adapter: input.adapter,
+      protocolVersion: input.protocolVersion ?? 1,
       hostTaskName: input.hostTaskName,
       promptHash: input.promptHash,
       status: "prepared",
@@ -2188,6 +2212,25 @@ export class AgentFlowEngine {
       && candidate.status !== "completed"
       && candidate.status !== "cancelled"
     ));
+  }
+
+  private assertSupervisorWaveParticipation(state: RunState, task: Task): void {
+    if (task.waveId === undefined || task.materializedFrom?.kind !== "implementation-plan") return;
+    const supervisorTask = Object.values(state.tasks).find((candidate) => (
+      candidate.id !== task.id
+      && candidate.stageId === task.stageId
+      && candidate.waveId === task.waveId
+      && candidate.materializedFrom?.artifactId === task.materializedFrom?.artifactId
+      && candidate.materializedFrom?.sha256 === task.materializedFrom?.sha256
+      && candidate.ownerKind === "supervisor"
+      && !["pending", "ready", "cancelled"].includes(candidate.status)
+    ));
+    invariant(
+      supervisorTask !== undefined,
+      `A Supervisor-owned Task must start before delegating wave ${task.waveId}`,
+      "SUPERVISOR_WAVE_PARTICIPATION_REQUIRED",
+      { taskId: task.id, waveId: task.waveId }
+    );
   }
 
   private assertResourceActor(owner: string, actor: Actor): void {

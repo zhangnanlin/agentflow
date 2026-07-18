@@ -6,7 +6,9 @@ import {
   CodexNativeWorkerAdapter,
   HostBudgetCoordinator,
   NativeRateLimitError,
-  nativeCapabilitiesFromV1
+  hashWorkerPrompt,
+  nativeCapabilitiesFromV1,
+  renderWorkerPrompt
 } from "../src/index.js";
 import { FakeNativeHost, spawnInput, workerResult } from "./native-conformance.js";
 
@@ -95,6 +97,51 @@ describe("NativeWorkerProtocol v2 policy", () => {
       capabilities: {
         operations: { waitAny: "temporarily-unavailable" },
         reasons: expect.arrayContaining([expect.stringContaining("waitAny")])
+      }
+    });
+    expect(host.spawnFresh).not.toHaveBeenCalled();
+  });
+
+  it("spawns the exact content-addressed prompt prepared by the control plane", async () => {
+    const host = new FakeNativeHost("codex", true);
+    const adapter = new CodexNativeWorkerAdapter(host, { budget });
+    const input = spawnInput();
+
+    const outcome = await adapter.spawnFresh(input);
+
+    expect(outcome).toMatchObject({
+      status: "spawned",
+      handle: {
+        promptHash: hashWorkerPrompt(input),
+        promptBytes: Buffer.byteLength(renderWorkerPrompt(input), "utf8")
+      }
+    });
+    expect(host.spawnFresh).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: renderWorkerPrompt(input),
+      promptHash: hashWorkerPrompt(input),
+      promptBytes: Buffer.byteLength(renderWorkerPrompt(input), "utf8")
+    }));
+  });
+
+  it("rejects a live tool profile that can spawn nested agents", async () => {
+    const host = new FakeNativeHost("codex", true);
+    host.probe.mockResolvedValue({
+      adapterVersion: "2.0.0",
+      contextPolicy: { mode: "fresh-attested", inheritedTurnCountObservable: true },
+      toolProfile: {
+        mode: "allowlist",
+        enforced: true,
+        tools: ["read_file", "functions.collaboration.spawn_agent"],
+        agentflowMcpEnabled: false
+      }
+    });
+    const adapter = new CodexNativeWorkerAdapter(host, { budget });
+
+    await expect(adapter.spawnFresh(spawnInput())).resolves.toMatchObject({
+      status: "fallback",
+      reason: "adapter-non-conforming",
+      capabilities: {
+        reasons: expect.arrayContaining([expect.stringContaining("nested-agent")])
       }
     });
     expect(host.spawnFresh).not.toHaveBeenCalled();

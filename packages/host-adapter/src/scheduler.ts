@@ -550,17 +550,21 @@ export class HostBudgetCoordinator {
     const deadline = Date.now() + this.lockTimeoutMs;
     const token = randomUUID();
     while (true) {
+      const candidate = join(this.budgetDirectory, `.lock.candidate-${token}-${randomUUID()}`);
       try {
-        await mkdir(this.lockDirectory);
-        await writeFile(join(this.lockDirectory, "owner.json"), JSON.stringify({
+        await mkdir(candidate);
+        await writeFile(join(candidate, "owner.json"), JSON.stringify({
           version: 1,
           token,
           pid: process.pid,
           acquiredAt: new Date().toISOString()
         }), { encoding: "utf8", flag: "wx" });
+        await rename(candidate, this.lockDirectory);
         return token;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!isRetryableLockRace(error)) throw error;
+      } finally {
+        await rm(candidate, { recursive: true, force: true });
       }
 
       try {
@@ -611,9 +615,17 @@ export class HostBudgetCoordinator {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
-    const owner = parseJson(ownerSource) as { token?: unknown };
+    const owner = parseJson(ownerSource) as { token?: unknown; pid?: unknown; acquiredAt?: unknown };
     if (typeof owner.token !== "string" || owner.token.length < 1 || owner.token.length > 256) {
       throw new SchedulerError("Stale scheduler lock has no valid owner token", "SCHEDULER_LOCK_INVALID");
+    }
+    if (
+      typeof owner.acquiredAt === "string"
+      && Number.isSafeInteger(owner.pid)
+      && (owner.pid as number) > 0
+      && processIsAlive(owner.pid as number)
+    ) {
+      return false;
     }
 
     try {
@@ -788,6 +800,17 @@ function isRetryableLockRace(error: unknown): boolean {
   return ["ENOENT", "EEXIST", "ENOTEMPTY", "EBUSY", "EPERM", "EACCES"].includes(
     (error as NodeJS.ErrnoException).code ?? ""
   );
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    return code === "EPERM" || code === "EACCES";
+  }
 }
 
 async function delay(milliseconds: number): Promise<void> {

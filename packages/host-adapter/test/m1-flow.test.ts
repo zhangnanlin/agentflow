@@ -167,6 +167,27 @@ describe("M1 native multi-worker flow", () => {
       backendResult,
       context(state, supervisor, "collect-backend")
     );
+    for (const input of [frontend, backend]) {
+      await recoveredAdapter.close(input.workerId);
+      state = await engine.closeWorker(
+        state.id,
+        input.workerId,
+        "Close collected legacy Worker",
+        context(state, supervisor, `close-${input.taskId}`)
+      );
+      state = await engine.recordWorkerCleanup(state.id, {
+        workerId: input.workerId,
+        step: "archive",
+        status: "unsupported",
+        reason: "Legacy Codex adapter has no archive operation"
+      }, context(state, supervisor, `archive-${input.taskId}`));
+      state = await engine.recordWorkerCleanup(state.id, {
+        workerId: input.workerId,
+        step: "permitRelease",
+        status: "unsupported",
+        reason: "Legacy Codex adapter has no host budget permit"
+      }, context(state, supervisor, `release-${input.taskId}`));
+    }
     expect(state.tasks.review?.status).toBe("ready");
 
     const review = workerInput("run-m1", "review", "worker-review", []);
@@ -195,6 +216,25 @@ describe("M1 native multi-worker flow", () => {
       reviewResult,
       context(state, supervisor, "collect-review")
     );
+    await recoveredAdapter.close(review.workerId);
+    state = await engine.closeWorker(
+      state.id,
+      review.workerId,
+      "Close collected legacy review Worker",
+      context(state, supervisor, "close-review")
+    );
+    state = await engine.recordWorkerCleanup(state.id, {
+      workerId: review.workerId,
+      step: "archive",
+      status: "unsupported",
+      reason: "Legacy Codex adapter has no archive operation"
+    }, context(state, supervisor, "archive-review"));
+    state = await engine.recordWorkerCleanup(state.id, {
+      workerId: review.workerId,
+      step: "permitRelease",
+      status: "unsupported",
+      reason: "Legacy Codex adapter has no host budget permit"
+    }, context(state, supervisor, "release-review"));
     state = await engine.completeStage(state.id, "S11", context(state, supervisor, "complete-implementation"));
 
     expect(state.activeStageId).toBe("S12");

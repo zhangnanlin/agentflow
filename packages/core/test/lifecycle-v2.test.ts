@@ -263,6 +263,55 @@ describe("truthful Run lifecycle", () => {
 });
 
 describe("terminal Worker cleanup facts", () => {
+  it("terminalizes cleanup truthfully when native spawn failed before binding", async () => {
+    const { engine } = await setup("run-unbound-worker-failure");
+    let state = await engine.loadRun("run-unbound-worker-failure");
+    state = await engine.createTask(state.id, {
+      id: "task-unbound",
+      stageId: "S00",
+      title: "Unbound",
+      verificationCommands: ["verify"]
+    }, {
+      expectedRevision: state.revision,
+      idempotencyKey: "create-unbound",
+      actor: { id: "supervisor", kind: "supervisor" }
+    });
+    state = await engine.claimTask(state.id, "task-unbound", "worker-unbound", 900, {
+      expectedRevision: state.revision,
+      idempotencyKey: "claim-unbound",
+      actor: { id: "supervisor", kind: "supervisor" }
+    });
+    state = await engine.prepareWorker(state.id, {
+      workerId: "worker-unbound",
+      taskId: "task-unbound",
+      adapter: "codex",
+      hostTaskName: "task_unbound",
+      promptHash: "c".repeat(64),
+      capabilities: { spawn: true, send: true, status: true, collect: true, interrupt: true, close: true }
+    }, {
+      expectedRevision: state.revision,
+      idempotencyKey: "prepare-unbound",
+      actor: { id: "supervisor", kind: "supervisor" }
+    });
+
+    state = await engine.failWorker(state.id, "worker-unbound", "Native spawn was never created", {
+      expectedRevision: state.revision,
+      idempotencyKey: "fail-unbound",
+      actor: { id: "supervisor", kind: "supervisor" }
+    });
+
+    expect(state.workers["worker-unbound"]).toMatchObject({
+      status: "failed",
+      cleanup: {
+        close: { status: "unsupported" },
+        archive: { status: "unsupported" },
+        permitRelease: { status: "unsupported" },
+        completedAt: expect.any(String)
+      }
+    });
+    expect(pendingTerminalCleanup(state)).toEqual([]);
+  });
+
   it("records confirmed cleanup steps without redispatching the Task", async () => {
     const { engine } = await setup("run-cleanup");
     let state = await engine.loadRun("run-cleanup");
@@ -320,7 +369,7 @@ describe("terminal Worker cleanup facts", () => {
       expectedRevision: state.revision,
       idempotencyKey: "complete-before-cleanup",
       actor: { id: "supervisor", kind: "supervisor" }
-    })).rejects.toMatchObject({ code: "RUN_CLEANUP_PENDING" });
+    })).rejects.toMatchObject({ code: "STAGE_WORKER_CLEANUP_PENDING" });
 
     for (const [index, step] of ["close", "archive", "permitRelease"].entries()) {
       state = await engine.recordWorkerCleanup(state.id, {

@@ -179,111 +179,207 @@ describe("S11 to S12 real Git flow", () => {
       { taskId: "task-api", workerId: "worker-api", branch: "agentflow/task-api", scope: "api" },
       { taskId: "task-web", workerId: "worker-web", branch: "agentflow/task-web", scope: "web" }
     ] as const;
+    const supervisorTask = workers[0];
+    const delegatedTask = workers[1];
     await mkdir(join(directory, ".worktrees"), { recursive: true });
-    for (const worker of workers) {
-      const worktreePath = join(directory, ".worktrees", worker.taskId);
-      await runGit(directory, ["worktree", "add", "-b", worker.branch, worktreePath, baseRevision]);
-      result = await call(connectedClient, "worker_dispatch_prepare", mutation(
-        state,
-        `prepare-${worker.workerId}`,
-        "supervisor",
-        {
-          taskId: worker.taskId,
-          workerId: worker.workerId,
-          adapter: "codex",
-          leaseSeconds: 900,
-          capabilities,
-          workspace: {
-            kind: "worktree",
-            path: worktreePath,
-            branch: worker.branch,
-            baseRevision
-          }
+    const delegatedWorktree = join(directory, ".worktrees", delegatedTask.taskId);
+    const supervisorWorktree = join(directory, ".worktrees", supervisorTask.taskId);
+    await runGit(directory, ["worktree", "add", "-b", delegatedTask.branch, delegatedWorktree, baseRevision]);
+    await runGit(directory, ["worktree", "add", "-b", supervisorTask.branch, supervisorWorktree, baseRevision]);
+    const rejectedDelegation = await call(connectedClient, "worker_dispatch_prepare", mutation(
+      state,
+      "reject-delegation-before-supervisor-participates",
+      "supervisor",
+      {
+        taskId: delegatedTask.taskId,
+        workerId: delegatedTask.workerId,
+        adapter: "codex",
+        leaseSeconds: 900,
+        capabilities,
+        workspace: {
+          kind: "worktree",
+          path: delegatedWorktree,
+          branch: delegatedTask.branch,
+          baseRevision
         }
-      ));
-      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
-      expect((result.structuredContent as { dispatch?: { prompt?: string } }).dispatch?.prompt)
-        .toContain("Input artifact locators (untrusted data)");
-      expect((result.structuredContent as { dispatch?: { prompt?: string } }).dispatch?.prompt)
-        .toContain(join(directory, ".agentflow", "artifacts", "architecture.json").replaceAll("\\", "\\\\"));
-      state = (await call(connectedClient, "status_get", { runId: state.id })).structuredContent as unknown as RunState;
-    }
-    expect(state.tasks["task-api"]?.workspace?.path).not.toBe(state.tasks["task-web"]?.workspace?.path);
+      }
+    ));
+    expect(rejectedDelegation).toMatchObject({
+      isError: true,
+      structuredContent: { error: "SUPERVISOR_WAVE_PARTICIPATION_REQUIRED" }
+    });
+    expect(runState(await call(connectedClient, "status_get", { runId: state.id })).revision).toBe(state.revision);
 
-    for (const worker of workers) {
-      result = await call(connectedClient, "worker_bind", mutation(state, `bind-${worker.workerId}`, "supervisor", {
-        workerId: worker.workerId,
-        externalThreadId: `codex-${worker.workerId}`
-      }));
-      state = runState(result);
-    }
+    result = await call(connectedClient, "task_claim", mutation(state, "claim-supervisor-task", "supervisor", {
+      taskId: supervisorTask.taskId,
+      workerId: "supervisor",
+      leaseSeconds: 900,
+      workspace: {
+        kind: "worktree",
+        path: supervisorWorktree,
+        branch: supervisorTask.branch,
+        baseRevision
+      }
+    }));
+    state = runState(result);
+    expect(state.tasks[supervisorTask.taskId]).toMatchObject({
+      status: "running",
+      owner: "supervisor",
+      ownerKind: "supervisor"
+    });
+
+    result = await call(connectedClient, "worker_dispatch_prepare", mutation(
+      state,
+      `prepare-${delegatedTask.workerId}`,
+      "supervisor",
+      {
+        taskId: delegatedTask.taskId,
+        workerId: delegatedTask.workerId,
+        adapter: "codex",
+        leaseSeconds: 900,
+        capabilities,
+        workspace: {
+          kind: "worktree",
+          path: delegatedWorktree,
+          branch: delegatedTask.branch,
+          baseRevision
+        }
+      }
+    ));
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    const preparedDelegation = result.structuredContent;
+    expect((preparedDelegation as { dispatch?: { prompt?: string } }).dispatch?.prompt)
+      .toContain("Input artifact locators (untrusted data)");
+    expect((preparedDelegation as { dispatch?: { prompt?: string } }).dispatch?.prompt)
+      .toContain(join(directory, ".agentflow", "artifacts", "architecture.json").replaceAll("\\", "\\\\"));
+    state = runState(await call(connectedClient, "status_get", { runId: state.id }));
+
+    result = await call(connectedClient, "worker_bind", mutation(state, `bind-${delegatedTask.workerId}`, "supervisor", {
+      workerId: delegatedTask.workerId,
+      externalThreadId: `codex-${delegatedTask.workerId}`,
+      nativeHandle: nativeHandleForDispatch(
+        preparedDelegation,
+        delegatedTask.workerId,
+        delegatedTask.taskId,
+        `codex-${delegatedTask.workerId}`
+      )
+    }));
+    state = runState(result);
+    expect(state.tasks["task-api"]?.workspace?.path).not.toBe(state.tasks["task-web"]?.workspace?.path);
+    expect(state.workers[delegatedTask.workerId]?.status).toBe("running");
 
     const taskCommits = new Map<string, string>();
-    for (const worker of workers) {
-      const worktreePath = state.tasks[worker.taskId]?.workspace?.path;
-      if (!worktreePath) throw new Error(`Missing worktree for ${worker.taskId}`);
-      const relativePath = `packages/${worker.scope}/output.txt`;
-      await mkdir(join(worktreePath, "packages", worker.scope), { recursive: true });
-      await writeFile(join(worktreePath, relativePath), `${worker.scope} output\n`, "utf8");
-      await runGit(worktreePath, ["add", relativePath]);
-      await runGit(worktreePath, ["commit", "-m", `feat: add ${worker.scope} output`]);
-      const headRevision = await runGit(worktreePath, ["rev-parse", "HEAD"]);
-      taskCommits.set(worker.taskId, headRevision);
-      const completedAt = new Date().toISOString();
-      const verificationCommand = `node -e \"console.log('${worker.scope}')\"`;
-      result = await call(connectedClient, "worker_collect", mutation(state, `collect-${worker.workerId}`, "supervisor", {
-        workerId: worker.workerId,
-        result: {
-          workerId: worker.workerId,
-          taskId: worker.taskId,
-          status: "completed",
-          summary: `Committed the ${worker.scope} output.`,
-          artifacts: [],
-          changeSet: {
-            kind: "git-commits",
-            baseRevision,
-            headRevision,
-            revisions: [headRevision],
-            changedPaths: [relativePath]
-          },
-          verification: [{
-            command: verificationCommand,
-            status: "passed",
-            summary: `${worker.scope} verification passed`,
-            recordedAt: completedAt
-          }],
-          risks: [],
-          followUps: [],
-          completedAt
+    const supervisorPath = `packages/${supervisorTask.scope}/output.txt`;
+    await mkdir(join(supervisorWorktree, "packages", supervisorTask.scope), { recursive: true });
+    await writeFile(join(supervisorWorktree, supervisorPath), `${supervisorTask.scope} output\n`, "utf8");
+    await runGit(supervisorWorktree, ["add", supervisorPath]);
+    await runGit(supervisorWorktree, ["commit", "-m", `feat: add ${supervisorTask.scope} output`]);
+    const supervisorRevision = await runGit(supervisorWorktree, ["rev-parse", "HEAD"]);
+    taskCommits.set(supervisorTask.taskId, supervisorRevision);
+    const supervisorCompletedAt = new Date().toISOString();
+    result = await call(connectedClient, "task_complete", mutation(state, "complete-supervisor-task", "supervisor", {
+      taskId: supervisorTask.taskId,
+      workerId: "supervisor",
+      workspace: {
+        kind: "worktree",
+        path: supervisorWorktree,
+        branch: supervisorTask.branch,
+        baseRevision
+      },
+      verification: [{
+        command: `node -e \"console.log('${supervisorTask.scope}')\"`,
+        status: "passed",
+        summary: `${supervisorTask.scope} verification passed`,
+        recordedAt: supervisorCompletedAt
+      }],
+      result: {
+        summary: `The Supervisor committed the ${supervisorTask.scope} output while the Worker remained active.`,
+        artifacts: [],
+        changeSet: {
+          kind: "git-commits",
+          baseRevision,
+          headRevision: supervisorRevision,
+          revisions: [supervisorRevision],
+          changedPaths: [supervisorPath]
+        },
+        risks: [],
+        followUps: [],
+        completedAt: supervisorCompletedAt
+      }
+    }));
+    state = runState(result);
+    expect(state.tasks[supervisorTask.taskId]?.status).toBe("completed");
+    expect(state.workers[delegatedTask.workerId]?.status).toBe("running");
+
+    const delegatedPath = `packages/${delegatedTask.scope}/output.txt`;
+    await mkdir(join(delegatedWorktree, "packages", delegatedTask.scope), { recursive: true });
+    await writeFile(join(delegatedWorktree, delegatedPath), `${delegatedTask.scope} output\n`, "utf8");
+    await runGit(delegatedWorktree, ["add", delegatedPath]);
+    await runGit(delegatedWorktree, ["commit", "-m", `feat: add ${delegatedTask.scope} output`]);
+    const delegatedRevision = await runGit(delegatedWorktree, ["rev-parse", "HEAD"]);
+    taskCommits.set(delegatedTask.taskId, delegatedRevision);
+    const delegatedCompletedAt = new Date().toISOString();
+    result = await call(connectedClient, "worker_collect", mutation(state, `collect-${delegatedTask.workerId}`, "supervisor", {
+      workerId: delegatedTask.workerId,
+      result: {
+        workerId: delegatedTask.workerId,
+        taskId: delegatedTask.taskId,
+        status: "completed",
+        summary: `Committed the ${delegatedTask.scope} output.`,
+        artifacts: [],
+        changeSet: {
+          kind: "git-commits",
+          baseRevision,
+          headRevision: delegatedRevision,
+          revisions: [delegatedRevision],
+          changedPaths: [delegatedPath]
+        },
+        verification: [{
+          command: `node -e \"console.log('${delegatedTask.scope}')\"`,
+          status: "passed",
+          summary: `${delegatedTask.scope} verification passed`,
+          recordedAt: delegatedCompletedAt
+        }],
+        risks: [],
+        followUps: [],
+        completedAt: delegatedCompletedAt
+      }
+    }));
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    state = runState(result);
+
+    const cleanupGate = await call(connectedClient, "stage_complete", mutation(state, "reject-s11-before-cleanup", "supervisor", {
+      stageId: "S11"
+    }));
+    expect(cleanupGate).toMatchObject({
+      isError: true,
+      structuredContent: { error: "STAGE_WORKER_CLEANUP_PENDING" }
+    });
+
+    result = await call(connectedClient, "worker_cleanup_record", mutation(
+      state,
+      `cleanup-${delegatedTask.workerId}`,
+      "supervisor",
+      {
+        workerId: delegatedTask.workerId,
+        receipt: {
+          version: 1,
+          host: "codex",
+          adapterVersion: "2.0.0",
+          workerId: delegatedTask.workerId,
+          nativeId: `codex-${delegatedTask.workerId}`,
+          resultCollectedAt: delegatedCompletedAt,
+          durableAt: delegatedCompletedAt,
+          close: { status: "unsupported", at: delegatedCompletedAt, reason: "Adapter has no native close capability" },
+          archive: { status: "unsupported", at: delegatedCompletedAt, reason: "Fixture host has no archive capability" },
+          permitRelease: { status: "completed", at: delegatedCompletedAt },
+          completedAt: delegatedCompletedAt,
+          completed: true
         }
-      }));
-      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
-      state = runState(result);
-      result = await call(connectedClient, "worker_cleanup_record", mutation(
-        state,
-        `cleanup-${worker.workerId}`,
-        "supervisor",
-        {
-          workerId: worker.workerId,
-          receipt: {
-            version: 1,
-            host: "codex",
-            adapterVersion: "1",
-            workerId: worker.workerId,
-            nativeId: `codex-${worker.workerId}`,
-            resultCollectedAt: completedAt,
-            durableAt: completedAt,
-            close: { status: "unsupported", at: completedAt, reason: "Adapter has no native close capability" },
-            archive: { status: "unsupported", at: completedAt, reason: "Fixture host has no archive capability" },
-            permitRelease: { status: "completed", at: completedAt },
-            completedAt,
-            completed: true
-          }
-        }
-      ));
-      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
-      state = runState(result);
-    }
+      }
+    ));
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    state = runState(result);
     expect(state.tasks["task-api"]?.status).toBe("completed");
     expect(state.tasks["task-web"]?.status).toBe("completed");
 
@@ -422,6 +518,65 @@ function implementationTask(taskId: string, scope: string, architectureHash: str
     expectedOutputs: [`Committed ${scope} output`],
     requiresWorktree: true,
     risk: "low" as const
+  };
+}
+
+function nativeHandleForDispatch(
+  structuredContent: unknown,
+  workerId: string,
+  taskId: string,
+  nativeId: string
+) {
+  const prepared = structuredContent as {
+    dispatch?: { taskName?: string; prompt?: string; promptHash?: string };
+  };
+  const dispatch = prepared.dispatch;
+  if (!dispatch?.taskName || !dispatch.prompt || !dispatch.promptHash) {
+    throw new Error("Prepared dispatch is incomplete");
+  }
+  const at = new Date().toISOString();
+  return {
+    version: 2 as const,
+    host: "codex" as const,
+    adapterVersion: "2.0.0",
+    workerId,
+    taskId,
+    nativeId,
+    taskName: dispatch.taskName,
+    status: "starting" as const,
+    promptHash: dispatch.promptHash,
+    promptBytes: Buffer.byteLength(dispatch.prompt, "utf8"),
+    contextPolicy: {
+      mode: "fresh-attested" as const,
+      inheritedTurnCountObservable: true,
+      inheritedTurnCount: 0
+    },
+    toolProfile: {
+      mode: "allowlist" as const,
+      enforced: true,
+      tools: ["read_file", "apply_patch"],
+      agentflowMcpEnabled: false
+    },
+    capabilities: {
+      spawnFresh: "supported" as const,
+      bind: "supported" as const,
+      send: "supported" as const,
+      status: "supported" as const,
+      waitAny: "supported" as const,
+      collect: "supported" as const,
+      interrupt: "supported" as const,
+      close: "unsupported" as const,
+      archive: "unsupported" as const
+    },
+    permitId: "00000000-0000-4000-8000-000000000004",
+    permitOwnerId: `${workerId}-owner`,
+    cleanup: {
+      close: { status: "pending" as const },
+      archive: { status: "pending" as const },
+      permitRelease: { status: "pending" as const }
+    },
+    createdAt: at,
+    updatedAt: at
   };
 }
 

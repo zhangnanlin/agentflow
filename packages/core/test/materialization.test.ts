@@ -149,61 +149,55 @@ describe("implementation plan materialization", () => {
       plan
     }, context(state, supervisor, "duplicate-plan"))).rejects.toMatchObject({ code: "PLAN_ALREADY_MATERIALIZED" });
 
-    const workerId = "worker-contract";
-    state = await engine.claimTask(
-      state.id,
-      "task-contract",
-      workerId,
-      60,
-      context(state, { id: workerId, kind: "worker" }, "claim-contract")
-    );
-    await expect(engine.completeTask(state.id, "task-contract", workerId, [{
+    const workspace = { kind: "project" as const, path: join(tmpdir(), "agentflow-materialization-workspace") };
+    state = await engine.claimInlineTask(state.id, {
+      taskId: "task-contract",
+      leaseSeconds: 60,
+      workspace
+    }, context(state, supervisor, "claim-contract-inline"));
+    await expect(engine.completeTask(state.id, "task-contract", supervisor.id, [{
       command: "npm test -- contract",
       status: "passed",
       summary: "A direct completion tried to bypass WorkerResult",
       recordedAt: new Date().toISOString()
-    }], {}, context(state, { id: workerId, kind: "worker" }, "reject-direct-complete")))
+    }], {}, context(state, supervisor, "reject-direct-complete")))
       .rejects.toMatchObject({ code: "TASK_WORKER_RESULT_REQUIRED" });
-    state = await engine.prepareTaskDispatch(state.id, {
-      workerId,
+    await expect(engine.prepareTaskDispatch(state.id, {
+      workerId: "worker-contract",
       taskId: "task-contract",
       adapter: "codex",
       hostTaskName: "materialized_contract_worker",
       promptHash: "c".repeat(64),
       capabilities: { spawn: true, send: true, status: true, collect: true, interrupt: true, close: false },
       leaseSeconds: 60,
-      workspace: { kind: "project", path: join(tmpdir(), "agentflow-materialization-workspace") }
-    }, context(state, supervisor, "prepare-contract"));
-    state = await engine.bindWorker(
-      state.id,
-      workerId,
-      "codex-contract-thread",
-      context(state, supervisor, "bind-contract")
-    );
+      workspace
+    }, context(state, supervisor, "reject-single-task-delegation")))
+      .rejects.toMatchObject({ code: "SUPERVISOR_WAVE_PARTICIPATION_REQUIRED" });
     const completedAt = new Date().toISOString();
-    state = await engine.collectWorkerResult(state.id, workerId, {
-      workerId,
+    state = await engine.completeInlineTask(state.id, {
       taskId: "task-contract",
-      status: "completed",
-      summary: "Contract implemented",
-      artifacts: [],
-      changeSet: {
-        kind: "git-commits",
-        baseRevision: plan.repository.baseRevision,
-        headRevision: "c".repeat(64),
-        revisions: ["c".repeat(64)],
-        changedPaths: ["packages/contracts/index.ts"]
-      },
-      verification: [{
-        command: "npm test -- contract",
-        status: "passed",
-        summary: "Contract tests passed",
-        recordedAt: completedAt
-      }],
-      risks: [],
-      followUps: [],
-      completedAt
-    }, context(state, supervisor, "collect-contract"));
+      workspace,
+      result: {
+        summary: "Contract implemented by the Supervisor",
+        artifacts: [],
+        changeSet: {
+          kind: "git-commits",
+          baseRevision: plan.repository.baseRevision,
+          headRevision: "c".repeat(64),
+          revisions: ["c".repeat(64)],
+          changedPaths: ["packages/contracts/index.ts"]
+        },
+        verification: [{
+          command: "npm test -- contract",
+          status: "passed",
+          summary: "Contract tests passed",
+          recordedAt: completedAt
+        }],
+        risks: [],
+        followUps: [],
+        completedAt
+      }
+    }, context(state, supervisor, "complete-contract-inline"));
     expect(state.tasks["task-client"]?.status).toBe("ready");
   });
 

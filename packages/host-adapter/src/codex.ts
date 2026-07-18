@@ -253,6 +253,8 @@ export class CodexThreadAdapter implements ThreadAdapter {
 export function renderWorkerPrompt(input: SpawnWorkerInput): string {
   return [
     "You are an AgentFlow worker. Work only on the assigned task and return the required JSON result.",
+    "Run in the fresh native context supplied by the host; do not import Supervisor conversation history.",
+    "Use only the enforced Worker tool allowlist. AgentFlow MCP and nested-agent tools must remain disabled.",
     "",
     `Run: ${input.runId}`,
     `Task: ${input.taskId}`,

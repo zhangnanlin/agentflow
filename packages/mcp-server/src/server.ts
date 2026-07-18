@@ -38,10 +38,12 @@ import {
 import {
   AGENTFLOW_MCP_INSTRUCTIONS,
   DispatchWorkspaceSchema,
+  MAX_NATIVE_ENVELOPE_BYTES,
   NativeCleanupReceiptSchema,
   NativeWorkerHandleSchema,
   buildWorkerDispatchInput,
   hashWorkerPrompt,
+  isForbiddenWorkerTool,
   renderWorkerPrompt,
   type DispatchWorkspace
 } from "@agentflow/host-adapter";
@@ -642,7 +644,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("worker_prepare", {
     title: "Prepare AgentFlow worker",
-    description: "Persist a claimed worker and bounded prompt hash before invoking the native host spawn operation.",
+    description: "Legacy Full-run compatibility path; adaptive Runs must use worker_dispatch_prepare.",
     inputSchema: {
       ...mutationShape,
       workerId: IdentifierSchema,
@@ -654,6 +656,13 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    if (target.state.workflow.policyVersion !== "legacy-0.4.0") {
+      throw new AgentFlowError(
+        "Adaptive Runs require the deterministic NativeWorkerProtocol v2 dispatch path",
+        "WORKER_V2_DISPATCH_REQUIRED",
+        { workerId: input.workerId, taskId: input.taskId }
+      );
+    }
     return mutationOutput(input, target.state, () => target.engine.prepareWorker(target.runId, {
       workerId: input.workerId,
       taskId: input.taskId,
@@ -687,6 +696,14 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     const dispatch = buildWorkerDispatchInput(target.state, input.taskId, input.workerId, workspace, paths.projectRoot);
     const prompt = renderWorkerPrompt(dispatch);
     const promptHash = hashWorkerPrompt(dispatch);
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    if (promptBytes > MAX_NATIVE_ENVELOPE_BYTES) {
+      throw new AgentFlowError(
+        "Worker prompt exceeds the native protocol byte budget",
+        "WORKER_PROMPT_TOO_LARGE",
+        { taskId: input.taskId, promptBytes, maximumBytes: MAX_NATIVE_ENVELOPE_BYTES }
+      );
+    }
     const existing = target.state.workers[input.workerId];
     if (existing && (
       existing.taskId !== input.taskId
@@ -719,6 +736,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
           profile: dispatch.profile,
           prompt,
           promptHash,
+          promptBytes,
           workspace
         }
       };
@@ -734,6 +752,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
         profile: dispatch.profile,
         prompt,
         promptHash,
+        promptBytes,
         workspace
       }
     };
@@ -741,7 +760,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("worker_bind", {
     title: "Bind AgentFlow worker",
-    description: "Bind a prepared Worker to a native task and persist optional v2 isolation evidence.",
+    description: "Bind a prepared Worker; v2 dispatch requires exact native isolation evidence.",
     inputSchema: {
       ...mutationShape,
       workerId: IdentifierSchema,
@@ -749,9 +768,40 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
       nativeHandle: NativeWorkerHandleSchema.optional()
     }
   }, async (input) => handleTool(async () => {
-    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    const { paths, target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
     const worker = target.state.workers[input.workerId];
     const handle = input.nativeHandle;
+    if (worker?.protocolVersion === 2 && handle === undefined) {
+      throw new AgentFlowError(
+        "NativeWorkerProtocol v2 binding requires an attested native handle",
+        "WORKER_NATIVE_HANDLE_REQUIRED",
+        { workerId: input.workerId, taskId: worker.taskId }
+      );
+    }
+    let expectedPromptBytes: number | undefined;
+    if (worker?.protocolVersion === 2) {
+      const task = target.state.tasks[worker.taskId];
+      if (!task?.workspace) {
+        throw new AgentFlowError(
+          "Prepared v2 Worker has no bound workspace",
+          "WORKER_NATIVE_BINDING_MISMATCH",
+          { workerId: input.workerId, taskId: worker.taskId }
+        );
+      }
+      const dispatch = buildWorkerDispatchInput(
+        target.state,
+        worker.taskId,
+        worker.id,
+        {
+          kind: task.workspace.kind,
+          path: task.workspace.path,
+          ...(task.workspace.branch === undefined ? {} : { branch: task.workspace.branch }),
+          ...(task.workspace.baseRevision === undefined ? {} : { baseRevision: task.workspace.baseRevision })
+        },
+        paths.projectRoot
+      );
+      expectedPromptBytes = Buffer.byteLength(renderWorkerPrompt(dispatch), "utf8");
+    }
     if (handle !== undefined) {
       if (
         !worker
@@ -760,6 +810,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
         || handle.nativeId !== input.externalThreadId
         || handle.taskName !== worker.hostTaskName
         || handle.promptHash !== worker.promptHash
+        || (expectedPromptBytes !== undefined && handle.promptBytes !== expectedPromptBytes)
         || !worker.adapter.toLowerCase().includes(handle.host)
       ) {
         throw new AgentFlowError(
@@ -774,7 +825,7 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
         || handle.toolProfile.mode !== "allowlist"
         || !handle.toolProfile.enforced
         || handle.toolProfile.agentflowMcpEnabled
-        || handle.toolProfile.tools.some((tool) => /agentflow/iu.test(tool))
+        || handle.toolProfile.tools.some(isForbiddenWorkerTool)
       ) {
         throw new AgentFlowError(
           "Native Worker handle does not prove zero-history isolation and an AgentFlow-free tool profile",

@@ -16,7 +16,7 @@ import {
 } from "./scheduler.js";
 import { renderWorkerPrompt } from "./codex.js";
 
-const MAX_ENVELOPE_BYTES = 16_384;
+export const MAX_NATIVE_ENVELOPE_BYTES = 16_384;
 const MAX_CAPSULE_BYTES = 16_384;
 const IdSchema = z.string().min(1).max(160).regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/);
 const IsoDateSchema = z.iso.datetime({ offset: true });
@@ -98,7 +98,7 @@ export const NativeWorkerHandleSchema = z.object({
   taskName: z.string().min(1).max(100),
   status: WorkerStatusSchema,
   promptHash: Sha256Schema,
-  promptBytes: z.number().int().min(1).max(MAX_ENVELOPE_BYTES),
+  promptBytes: z.number().int().min(1).max(MAX_NATIVE_ENVELOPE_BYTES),
   contextPolicy: NativeContextPolicySchema,
   toolProfile: NativeToolProfileSchema,
   capabilities: NativeOperationsSchema,
@@ -284,6 +284,9 @@ export class NativeWorkerAdapter implements NativeWorkerProtocolV2 {
     if (raw.toolProfile.agentflowMcpEnabled || raw.toolProfile.tools.some(isAgentFlowTool)) {
       reasons.push("Worker tool profile includes AgentFlow MCP.");
     }
+    if (raw.toolProfile.tools.some(isNestedAgentTool)) {
+      reasons.push("Worker tool profile includes a nested-agent tool.");
+    }
     for (const operation of ["spawnFresh", "send", "status", "waitAny", "collect", "interrupt", "close"] as const) {
       if (operations[operation] !== "supported") reasons.push(`Required native operation is unavailable: ${operation}.`);
     }
@@ -310,7 +313,7 @@ export class NativeWorkerAdapter implements NativeWorkerProtocolV2 {
     }
     const prompt = renderNativeWorkerPrompt(input, probe.toolProfile);
     const promptBytes = Buffer.byteLength(prompt, "utf8");
-    if (promptBytes > MAX_ENVELOPE_BYTES) {
+    if (promptBytes > MAX_NATIVE_ENVELOPE_BYTES) {
       return this.fallback("envelope-too-large", "Reduce the Task envelope before native dispatch.", probe);
     }
     if (containsConversationEnvelope(input)) {
@@ -880,15 +883,9 @@ export function nativeCapabilitiesFromV1(
 
 export function renderNativeWorkerPrompt(
   input: SpawnWorkerInput,
-  toolProfile: z.infer<typeof NativeToolProfileSchema>
+  _toolProfile: z.infer<typeof NativeToolProfileSchema>
 ): string {
-  return [
-    renderWorkerPrompt(input),
-    "",
-    "Native context policy: fresh context required; inherited conversation disabled.",
-    `Worker tool allowlist: ${canonicalJson(toolProfile.tools)}`,
-    "AgentFlow MCP: disabled. The Supervisor alone owns control-plane mutations."
-  ].join("\n");
+  return renderWorkerPrompt(input);
 }
 
 function pendingCleanup(): z.infer<typeof NativeHandleCleanupSchema> {
@@ -928,6 +925,38 @@ function isCleanupComplete(cleanup: z.infer<typeof NativeHandleCleanupSchema>): 
 
 function isAgentFlowTool(tool: string): boolean {
   return /agentflow/iu.test(tool);
+}
+
+const NESTED_AGENT_TOOL_SEGMENTS = new Set([
+  "agent",
+  "agents",
+  "create_task",
+  "create_thread",
+  "fork_thread",
+  "followup_task",
+  "handoff_thread",
+  "interrupt_agent",
+  "list_agents",
+  "send_message",
+  "send_message_to_thread",
+  "spawn_agent",
+  "subagent",
+  "subagents",
+  "task",
+  "wait_agent"
+]);
+
+function isNestedAgentTool(tool: string): boolean {
+  const normalized = tool.trim().toLowerCase();
+  const segments = [normalized, ...normalized.split(/[^a-z0-9_]+/u)];
+  return segments.some((segment) => (
+    NESTED_AGENT_TOOL_SEGMENTS.has(segment)
+    || /^(?:create|dispatch|fork|launch|run|spawn|start)_(?:sub)?agents?$/u.test(segment)
+  ));
+}
+
+export function isForbiddenWorkerTool(tool: string): boolean {
+  return isAgentFlowTool(tool) || isNestedAgentTool(tool);
 }
 
 function containsConversationEnvelope(input: SpawnWorkerInput): boolean {
