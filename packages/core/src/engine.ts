@@ -28,6 +28,7 @@ import {
   type ThreadCapabilities,
   type VerificationRecord,
   type WorkerResult,
+  type WorkerContextPolicy,
   type WorkerStatus
 } from "./model.js";
 import { downstreamStageIds, readyStages, stageById, validatePipeline } from "./pipeline.js";
@@ -132,6 +133,24 @@ export interface RecordWorkerCleanupInput {
   step: "close" | "archive" | "permitRelease";
   status: "completed" | "unsupported" | "failed";
   reason?: string;
+}
+
+export interface NativeWorkerBindingFacts {
+  adapterVersion: string;
+  contextPolicy: WorkerContextPolicy;
+}
+
+export interface WorkerCleanupObservation {
+  status: "pending" | "completed" | "unsupported" | "failed";
+  at?: string;
+  reason?: string;
+}
+
+export interface RecordWorkerCleanupReceiptInput {
+  workerId: string;
+  close: WorkerCleanupObservation;
+  archive: WorkerCleanupObservation;
+  permitRelease: WorkerCleanupObservation;
 }
 
 export interface AcquireResourceInput {
@@ -987,7 +1006,8 @@ export class AgentFlowEngine {
     runId: string,
     workerId: string,
     externalThreadId: string,
-    context: MutationContext
+    context: MutationContext,
+    nativeFacts?: NativeWorkerBindingFacts
   ): Promise<RunState> {
     return this.mutate(runId, "worker.bind", context, (state, now) => {
       invariant(
@@ -1015,6 +1035,10 @@ export class AgentFlowEngine {
         "EXTERNAL_THREAD_BOUND"
       );
       worker.externalThreadId = externalThreadId;
+      if (nativeFacts !== undefined) {
+        worker.adapterVersion = nativeFacts.adapterVersion;
+        worker.contextPolicy = nativeFacts.contextPolicy;
+      }
       worker.status = "running";
       worker.updatedAt = now;
       this.event(state, "worker.bound", context.actor, now, { workerId, externalThreadId, adapter: worker.adapter });
@@ -1224,6 +1248,49 @@ export class AgentFlowEngine {
         taskId: worker.taskId,
         step: input.step,
         status: input.status
+      });
+      return state;
+    });
+  }
+
+  recordWorkerCleanupReceipt(
+    runId: string,
+    input: RecordWorkerCleanupReceiptInput,
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "worker.cleanup.receipt.record", context, (state, now) => {
+      invariant(
+        context.actor.kind === "supervisor" || context.actor.kind === "system",
+        "Only a Supervisor or system actor can record Worker cleanup",
+        "WORKER_CLEANUP_ACTOR_INVALID"
+      );
+      const worker = state.workers[input.workerId];
+      invariant(worker, `Worker not found: ${input.workerId}`, "WORKER_NOT_FOUND");
+      invariant(!isLiveWorker(worker.status), `Worker must be terminal before cleanup: ${worker.status}`, "WORKER_NOT_TERMINAL");
+      invariant(worker.cleanup, `Worker has no collected cleanup state: ${worker.id}`, "WORKER_CLEANUP_MISSING");
+
+      for (const step of ["close", "archive", "permitRelease"] as const) {
+        const observation = input[step];
+        worker.cleanup[step] = {
+          status: observation.status,
+          at: observation.at ?? now,
+          ...(observation.reason === undefined ? {} : { reason: observation.reason })
+        };
+      }
+      const terminalSteps = [worker.cleanup.close, worker.cleanup.archive, worker.cleanup.permitRelease];
+      if (terminalSteps.every((step) => step.status === "completed" || step.status === "unsupported")) {
+        worker.cleanup.completedAt = now;
+      } else {
+        delete worker.cleanup.completedAt;
+      }
+      worker.updatedAt = now;
+      this.event(state, "worker.cleanup.receipt.recorded", context.actor, now, {
+        workerId: worker.id,
+        taskId: worker.taskId,
+        close: input.close.status,
+        archive: input.archive.status,
+        permitRelease: input.permitRelease.status,
+        completed: worker.cleanup.completedAt !== undefined
       });
       return state;
     });

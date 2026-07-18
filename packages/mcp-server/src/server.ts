@@ -29,6 +29,7 @@ import {
   type ChangeReceipt,
   type RunState,
   type RunSummary,
+  type Task,
   type WorkerResult,
   type UxArchitectureContract,
   type VerificationRecord
@@ -36,6 +37,8 @@ import {
 import {
   AGENTFLOW_MCP_INSTRUCTIONS,
   DispatchWorkspaceSchema,
+  NativeCleanupReceiptSchema,
+  NativeWorkerHandleSchema,
   buildWorkerDispatchInput,
   hashWorkerPrompt,
   renderWorkerPrompt,
@@ -461,15 +464,37 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("task_claim", {
     title: "Claim AgentFlow task",
-    description: "Claim a ready task for a worker with a time-bounded lease.",
+    description: "Claim a ready Task for a Worker, or for the Supervisor when a verified workspace is supplied.",
     inputSchema: {
       ...mutationShape,
       taskId: IdentifierSchema,
       workerId: IdentifierSchema,
-      leaseSeconds: z.number().int().positive().max(86_400).default(900)
+      leaseSeconds: z.number().int().positive().max(86_400).default(900),
+      workspace: DispatchWorkspaceSchema.optional()
     }
   }, async (input) => handleTool(async () => {
-    const { target } = await targetFor(input, actor("worker", input.workerId));
+    const workspace = input.workspace;
+    const inline = workspace !== undefined;
+    const { paths, target } = await targetFor(input, actor(inline ? "supervisor" : "worker", input.workerId));
+    if (workspace !== undefined) {
+      if (input.actorId !== input.workerId) {
+        throw new AgentFlowError(
+          "Inline Task owner must match the Supervisor actor",
+          "TASK_INLINE_OWNER_MISMATCH",
+          { actorId: input.actorId, workerId: input.workerId }
+        );
+      }
+      const replay = target.state.idempotency[input.idempotencyKey]?.operation === "task.claim.inline";
+      if (!replay) {
+        await verifyDispatchWorkspace(paths.projectRoot, workspace);
+        await verifyInlinePlannedRepositoryBase(target.state, input.taskId, workspace);
+      }
+      return mutationOutput(input, target.state, () => target.engine.claimInlineTask(target.runId, {
+        taskId: input.taskId,
+        leaseSeconds: input.leaseSeconds,
+        workspace
+      }, target.context));
+    }
     return mutationOutput(input, target.state, () => target.engine.claimTask(
       target.runId,
       input.taskId,
@@ -501,15 +526,55 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("task_complete", {
     title: "Complete AgentFlow task",
-    description: "Complete a worker-owned task with verification evidence and a structured result.",
+    description: "Complete a Worker-owned Task, or a Supervisor-owned Task when its verified workspace is supplied.",
     inputSchema: {
       ...mutationShape,
       taskId: IdentifierSchema,
       workerId: IdentifierSchema,
       verification: z.array(VerificationSchema).min(1),
-      result: z.record(z.string(), z.unknown()).default({})
+      result: z.record(z.string(), z.unknown()).default({}),
+      workspace: DispatchWorkspaceSchema.optional()
     }
   }, async (input) => handleTool(async () => {
+    const workspace = input.workspace;
+    if (workspace !== undefined) {
+      const { target } = await targetFor(input, actor("supervisor", input.actorId));
+      if (input.actorId !== input.workerId) {
+        throw new AgentFlowError(
+          "Inline Task owner must match the Supervisor actor",
+          "TASK_INLINE_OWNER_MISMATCH",
+          { actorId: input.actorId, workerId: input.workerId }
+        );
+      }
+      const completedAt = typeof input.result["completedAt"] === "string"
+        ? input.result["completedAt"]
+        : new Date().toISOString();
+      const parsedResult = sanitizeWorkerResult(WorkerResultSchema.parse({
+        ...input.result,
+        workerId: input.workerId,
+        taskId: input.taskId,
+        status: "completed",
+        verification: input.verification,
+        completedAt
+      }));
+      const replay = target.state.idempotency[input.idempotencyKey]?.operation === "task.complete.inline";
+      if (!replay) {
+        await verifyTaskChangeSet(target.state.tasks[input.taskId], input.workerId, parsedResult);
+      }
+      return mutationOutput(input, target.state, () => target.engine.completeInlineTask(target.runId, {
+        taskId: input.taskId,
+        workspace,
+        result: {
+          summary: parsedResult.summary,
+          artifacts: parsedResult.artifacts,
+          changeSet: parsedResult.changeSet,
+          verification: parsedResult.verification,
+          risks: parsedResult.risks,
+          followUps: parsedResult.followUps,
+          completedAt: parsedResult.completedAt
+        }
+      }, target.context));
+    }
     const { target } = await targetFor(input, actor("worker", input.workerId));
     return mutationOutput(input, target.state, () => target.engine.completeTask(
       target.runId,
@@ -655,16 +720,64 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
 
   server.registerTool("worker_bind", {
     title: "Bind AgentFlow worker",
-    description: "Bind a prepared worker to the native thread ID returned by the current editor host.",
+    description: "Bind a prepared Worker to a native task and persist optional v2 isolation evidence.",
     inputSchema: {
       ...mutationShape,
       workerId: IdentifierSchema,
-      externalThreadId: z.string().min(1).max(512)
+      externalThreadId: z.string().min(1).max(512),
+      nativeHandle: NativeWorkerHandleSchema.optional()
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    const worker = target.state.workers[input.workerId];
+    const handle = input.nativeHandle;
+    if (handle !== undefined) {
+      if (
+        !worker
+        || handle.workerId !== input.workerId
+        || handle.taskId !== worker.taskId
+        || handle.nativeId !== input.externalThreadId
+        || handle.taskName !== worker.hostTaskName
+        || handle.promptHash !== worker.promptHash
+        || !worker.adapter.toLowerCase().includes(handle.host)
+      ) {
+        throw new AgentFlowError(
+          "Native Worker handle does not match the prepared binding",
+          "WORKER_NATIVE_BINDING_MISMATCH",
+          { workerId: input.workerId, taskId: worker?.taskId }
+        );
+      }
+      if (
+        handle.contextPolicy.mode !== "fresh-attested"
+        || handle.contextPolicy.inheritedTurnCount !== 0
+        || handle.toolProfile.mode !== "allowlist"
+        || !handle.toolProfile.enforced
+        || handle.toolProfile.agentflowMcpEnabled
+        || handle.toolProfile.tools.some((tool) => /agentflow/iu.test(tool))
+      ) {
+        throw new AgentFlowError(
+          "Native Worker handle does not prove zero-history isolation and an AgentFlow-free tool profile",
+          "WORKER_CONTEXT_ISOLATION_INVALID",
+          { workerId: input.workerId, host: handle.host }
+        );
+      }
+    }
     return mutationOutput(input, target.state, () => (
-      target.engine.bindWorker(target.runId, input.workerId, input.externalThreadId, target.context)
+      target.engine.bindWorker(
+        target.runId,
+        input.workerId,
+        input.externalThreadId,
+        target.context,
+        handle === undefined ? undefined : {
+          adapterVersion: handle.adapterVersion,
+          contextPolicy: {
+            mode: "fresh-attested",
+            inheritedTurnCount: handle.contextPolicy.inheritedTurnCount,
+            promptBytes: handle.promptBytes,
+            agentflowMcpEnabled: handle.toolProfile.agentflowMcpEnabled
+          }
+        }
+      )
     ));
   }));
 
@@ -711,10 +824,60 @@ export function createAgentFlowMcpServer(options: AgentFlowMcpServerOptions = {}
     }
   }, async (input) => handleTool(async () => {
     const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
-    await verifyWorkerChangeSet(target.state, input.workerId, input.result);
+    const result = sanitizeWorkerResult(input.result);
+    await verifyWorkerChangeSet(target.state, input.workerId, result);
     return mutationOutput(input, target.state, () => (
-      target.engine.collectWorkerResult(target.runId, input.workerId, input.result, target.context)
+      target.engine.collectWorkerResult(target.runId, input.workerId, result, target.context)
     ));
+  }));
+
+  server.registerTool("worker_cleanup_record", {
+    title: "Record native Worker cleanup",
+    description: "Persist one native cleanup receipt after terminal Worker evidence is durable.",
+    inputSchema: {
+      ...mutationShape,
+      workerId: IdentifierSchema,
+      receipt: NativeCleanupReceiptSchema
+    }
+  }, async (input) => handleTool(async () => {
+    const { target } = await targetFor(input, actor("supervisor", "mcp-supervisor"));
+    const worker = target.state.workers[input.workerId];
+    if (!worker) throw new AgentFlowError(`Worker not found: ${input.workerId}`, "WORKER_NOT_FOUND", { workerId: input.workerId });
+    if (input.receipt.workerId !== input.workerId) {
+      throw new AgentFlowError("Cleanup receipt Worker ID does not match", "WORKER_CLEANUP_RECEIPT_MISMATCH", {
+        workerId: input.workerId,
+        receiptWorkerId: input.receipt.workerId
+      });
+    }
+    if (worker.externalThreadId !== input.receipt.nativeId) {
+      throw new AgentFlowError("Cleanup receipt native task does not match the bound Worker", "WORKER_CLEANUP_RECEIPT_MISMATCH", {
+        workerId: input.workerId,
+        expectedNativeId: worker.externalThreadId,
+        actualNativeId: input.receipt.nativeId
+      });
+    }
+    if (
+      worker.adapterVersion !== input.receipt.adapterVersion
+      || !worker.adapter.toLowerCase().includes(input.receipt.host)
+    ) {
+      throw new AgentFlowError("Cleanup receipt adapter does not match the bound Worker", "WORKER_CLEANUP_RECEIPT_MISMATCH", {
+        workerId: input.workerId,
+        expectedAdapterVersion: worker.adapterVersion,
+        actualAdapterVersion: input.receipt.adapterVersion,
+        host: input.receipt.host
+      });
+    }
+    const clean = (step: typeof input.receipt.close) => ({
+      status: step.status,
+      ...(step.at === undefined ? {} : { at: step.at }),
+      ...(step.reason === undefined ? {} : { reason: redactCredentialText(step.reason) })
+    });
+    return mutationOutput(input, target.state, () => target.engine.recordWorkerCleanupReceipt(target.runId, {
+      workerId: input.workerId,
+      close: clean(input.receipt.close),
+      archive: clean(input.receipt.archive),
+      permitRelease: clean(input.receipt.permitRelease)
+    }, target.context));
   }));
 
   server.registerTool("worker_interrupt", {
@@ -1241,6 +1404,10 @@ function compactResponse<T>(value: T): T {
   return redactResponseValue(value) as T;
 }
 
+function sanitizeWorkerResult(result: WorkerResult): WorkerResult {
+  return WorkerResultSchema.parse(redactResponseValue(result));
+}
+
 function redactResponseValue(value: unknown, key?: string, depth = 0): unknown {
   if (value === undefined) return undefined;
   if (key !== undefined && isCredentialKey(key)) return "[REDACTED]";
@@ -1592,15 +1759,23 @@ function contractMetadata(kind: ArtifactContractKind, payload: unknown): Record<
 }
 
 async function verifyWorkerChangeSet(state: RunState, workerId: string, result: WorkerResult): Promise<void> {
+  const worker = state.workers[workerId];
+  if (!worker) {
+    throw new AgentFlowError("Worker change set has no bound Task workspace", "WORKER_CHANGESET_WORKSPACE_MISSING", {
+      workerId
+    });
+  }
+  return verifyTaskChangeSet(state.tasks[worker.taskId], workerId, result);
+}
+
+async function verifyTaskChangeSet(task: Task | undefined, ownerId: string, result: WorkerResult): Promise<void> {
   const changeSet = result.changeSet;
   if (changeSet === null) return;
-  const worker = state.workers[workerId];
-  const task = worker === undefined ? undefined : state.tasks[worker.taskId];
   const workspace = task?.workspace;
-  if (!worker || !task || !workspace) {
+  if (!task || !workspace) {
     throw new AgentFlowError("Worker change set has no bound Task workspace", "WORKER_CHANGESET_WORKSPACE_MISSING", {
-      workerId,
-      taskId: worker?.taskId
+      workerId: ownerId,
+      taskId: task?.id
     });
   }
 
@@ -1610,7 +1785,16 @@ async function verifyWorkerChangeSet(state: RunState, workerId: string, result: 
       execFileAsync("git", ["-C", workspace.path, "rev-parse", "HEAD"], options),
       execFileAsync("git", ["-C", workspace.path, "branch", "--show-current"], options),
       execFileAsync("git", ["-C", workspace.path, "rev-list", "--reverse", `${changeSet.baseRevision}..${changeSet.headRevision}`], options),
-      execFileAsync("git", ["-C", workspace.path, "diff", "--no-renames", "--name-only", "-z", changeSet.baseRevision, changeSet.headRevision], options),
+      execFileAsync("git", [
+        "-C",
+        workspace.path,
+        "show",
+        "--format=",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        ...changeSet.revisions
+      ], options),
       execFileAsync("git", ["-C", workspace.path, "status", "--porcelain=v1", "-z", "--untracked-files=all"], options)
     ]);
     await execFileAsync(
@@ -1621,18 +1805,30 @@ async function verifyWorkerChangeSet(state: RunState, workerId: string, result: 
     const actualHead = String(headResult.stdout).trim();
     const actualBranch = String(branchResult.stdout).trim();
     const actualRevisions = String(revisionsResult.stdout).split(/\r?\n/).filter(Boolean);
-    const actualPaths = String(pathsResult.stdout).split("\0").filter(Boolean).sort();
+    const actualPaths = [...new Set(String(pathsResult.stdout).split("\0").filter(Boolean))].sort();
     const dirtyEntries = String(statusResult.stdout).split("\0").filter(Boolean);
     const expectedPaths = [...changeSet.changedPaths].sort();
+    const taskScopedIntegration = workspace.kind === "project" && task.ownerKind === "supervisor";
+    let previousRevisionIndex = -1;
+    const expectedRevisionsAreOrderedAncestors = changeSet.revisions.every((revision) => {
+      const index = actualRevisions.indexOf(revision, previousRevisionIndex + 1);
+      if (index < 0) return false;
+      previousRevisionIndex = index;
+      return true;
+    });
+    const revisionsMatch = taskScopedIntegration
+      ? expectedRevisionsAreOrderedAncestors
+      : JSON.stringify(actualRevisions) === JSON.stringify(changeSet.revisions);
     if (
       actualHead !== changeSet.headRevision
-      || (workspace.branch !== undefined && actualBranch !== workspace.branch)
-      || JSON.stringify(actualRevisions) !== JSON.stringify(changeSet.revisions)
+      || ((workspace.branch ?? task.planRepository?.branch) !== undefined
+        && actualBranch !== (workspace.branch ?? task.planRepository?.branch))
+      || !revisionsMatch
       || JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)
       || dirtyEntries.length > 0
     ) {
       throw new AgentFlowError("Worker Git change set does not match the bound workspace", "WORKER_CHANGESET_GIT_MISMATCH", {
-        workerId,
+        workerId: ownerId,
         taskId: task.id,
         expectedBranch: workspace.branch,
         actualBranch,
@@ -1648,7 +1844,7 @@ async function verifyWorkerChangeSet(state: RunState, workerId: string, result: 
   } catch (error) {
     if (error instanceof AgentFlowError) throw error;
     throw new AgentFlowError("Unable to verify the Worker Git change set", "WORKER_CHANGESET_GIT_INVALID", {
-      workerId,
+      workerId: ownerId,
       taskId: task.id,
       workspace: workspace.path,
       message: error instanceof Error ? error.message : "git verification failed"
@@ -1717,6 +1913,53 @@ async function verifyPlannedRepositoryBase(
         taskId,
         expectedBaseRevision: planned.baseRevision,
         actualBaseRevision: actualHead,
+        expectedBranch: planned.branch,
+        actualBranch
+      });
+    }
+  } catch (error) {
+    if (error instanceof AgentFlowError) throw error;
+    throw new AgentFlowError("Unable to verify the approved repository baseline", "TASK_WORKSPACE_GIT_INVALID", {
+      taskId,
+      workspace: workspace.path,
+      message: error instanceof Error ? error.message : "git verification failed"
+    });
+  }
+}
+
+async function verifyInlinePlannedRepositoryBase(
+  state: RunState,
+  taskId: string,
+  workspace: DispatchWorkspace
+): Promise<void> {
+  const planned = state.tasks[taskId]?.planRepository;
+  if (!planned || workspace.kind === "worktree") {
+    await verifyPlannedRepositoryBase(state, taskId, workspace);
+    return;
+  }
+  try {
+    const options = { encoding: "utf8" as const, windowsHide: true };
+    const [head, branch] = await Promise.all([
+      execFileAsync("git", ["-C", workspace.path, "rev-parse", "HEAD"], options),
+      execFileAsync("git", ["-C", workspace.path, "branch", "--show-current"], options)
+    ]);
+    const actualHead = String(head.stdout).trim();
+    const actualBranch = String(branch.stdout).trim();
+    let descendsFromApprovedBase = true;
+    try {
+      await execFileAsync(
+        "git",
+        ["-C", workspace.path, "merge-base", "--is-ancestor", planned.baseRevision, actualHead],
+        options
+      );
+    } catch {
+      descendsFromApprovedBase = false;
+    }
+    if (actualBranch !== planned.branch || !descendsFromApprovedBase) {
+      throw new AgentFlowError("Project workspace does not descend from the approved repository baseline", "TASK_WORKSPACE_BASE_MISMATCH", {
+        taskId,
+        expectedBaseRevision: planned.baseRevision,
+        actualRevision: actualHead,
         expectedBranch: planned.branch,
         actualBranch
       });

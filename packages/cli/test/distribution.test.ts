@@ -14,6 +14,7 @@ const temporaryDirectories: string[] = [];
 const expectedToolNames = [
   "artifact_register",
   "artifact_validate",
+  "deterministic_operation_run",
   "gate_decision_request",
   "gate_resolve",
   "implementation_plan_materialize",
@@ -25,7 +26,11 @@ const expectedToolNames = [
   "resource_rekey",
   "resource_release",
   "resource_status",
+  "run_block",
+  "run_cancel",
+  "run_fail",
   "run_start_or_resume",
+  "run_supersede",
   "stage_complete",
   "stage_preflight_report",
   "stage_skip",
@@ -38,6 +43,7 @@ const expectedToolNames = [
   "task_retry",
   "task_setup_abort",
   "worker_bind",
+  "worker_cleanup_record",
   "worker_close",
   "worker_collect",
   "worker_dispatch_prepare",
@@ -600,7 +606,7 @@ describe("standalone AgentFlow distribution", () => {
           instruction: "Present all questions once and submit only explicit user selections."
         }
       });
-      const startedA = toolResult<{ action: string; state: { id: string } }>(await client.callTool({
+      const startedA = toolResult<{ action: string; summary: { runId: string } }>(await client.callTool({
         name: "run_start_or_resume",
         arguments: {
           projectRoot: projectA,
@@ -611,7 +617,7 @@ describe("standalone AgentFlow distribution", () => {
           requestKey: "packed-project-a-start"
         }
       }));
-      const startedB = toolResult<{ action: string; state: { id: string } }>(await client.callTool({
+      const startedB = toolResult<{ action: string; summary: { runId: string } }>(await client.callTool({
         name: "run_start_or_resume",
         arguments: {
           projectRoot: projectB,
@@ -622,8 +628,16 @@ describe("standalone AgentFlow distribution", () => {
           requestKey: "packed-project-b-start"
         }
       }));
-      expect(startedA).toMatchObject({ action: "started", state: { id: "packed-project-a" } });
-      expect(startedB).toMatchObject({ action: "started", state: { id: "packed-project-b" } });
+      expect(startedA).toMatchObject({ action: "started", summary: { runId: "packed-project-a" } });
+      expect(startedB).toMatchObject({ action: "started", summary: { runId: "packed-project-b" } });
+      expect(toolResult<{ id: string }>(await client.callTool({
+        name: "status_get",
+        arguments: {
+          projectRoot: projectA,
+          runId: "packed-project-a",
+          responseProfile: "full"
+        }
+      }))).toMatchObject({ id: "packed-project-a" });
     } finally {
       await client.close();
     }

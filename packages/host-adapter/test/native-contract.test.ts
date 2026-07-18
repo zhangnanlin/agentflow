@@ -252,6 +252,47 @@ describe("NativeWorkerProtocol v2 policy", () => {
     });
   });
 
+  it("redacts credential patterns from the compact Worker capsule", async () => {
+    const host = new FakeNativeHost("codex", true);
+    const adapter = new CodexNativeWorkerAdapter(host, { budget });
+    await adapter.spawnFresh(spawnInput());
+    host.complete("worker-1");
+    const baseResult = workerResult();
+    host.results.set("codex-native-worker-1", {
+      ...baseResult,
+      summary: "Completed with token=capsule-secret",
+      verification: [{
+        ...baseResult.verification[0]!,
+        summary: "Bearer capsule-bearer-secret"
+      }],
+      risks: ["api-key=capsule-api-secret"]
+    });
+
+    const result = await adapter.collect("worker-1");
+    const serialized = JSON.stringify(result);
+    expect(result).toMatchObject({
+      summary: "Completed with token=[REDACTED]",
+      verification: [{ summary: "Bearer [REDACTED]" }],
+      risks: ["api-key=[REDACTED]"]
+    });
+    expect(serialized).not.toContain("capsule-secret");
+    expect(serialized).not.toContain("capsule-bearer-secret");
+    expect(serialized).not.toContain("capsule-api-secret");
+
+    host.results.set("codex-native-worker-1", {
+      ...baseResult,
+      summary: "Completed with token=changed-capsule-secret",
+      verification: [{
+        ...baseResult.verification[0]!,
+        summary: "Bearer changed-capsule-bearer"
+      }],
+      risks: ["api-key=changed-capsule-api"]
+    });
+    await expect(adapter.collect("worker-1")).rejects.toMatchObject({
+      code: "WORKER_RESULT_INVALID"
+    });
+  });
+
   it("heartbeats permits with a host timer while one waitAny call is pending", async () => {
     const heartbeatHome = await mkdtemp(join(tmpdir(), "agentflow-native-heartbeat-"));
     try {

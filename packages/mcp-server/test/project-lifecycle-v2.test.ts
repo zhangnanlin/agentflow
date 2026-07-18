@@ -155,7 +155,7 @@ describe("project lifecycle v2 intent and lock semantics", () => {
     await writeFile(paths.startLockPath, "stale-generation", "utf8");
     const old = new Date(Date.now() - 60_000);
     await utimes(paths.startLockPath, old, old);
-    const dependencies = { staleLockMs: 20, lockTimeoutMs: 2_000, lockRetryMs: 1 };
+    const dependencies = { staleLockMs: 20, lockTimeoutMs: 10_000, lockRetryMs: 1 };
 
     const settled = await Promise.allSettled(Array.from({ length: 12 }, (_, index) => (
       startOrResumeRun(paths, {

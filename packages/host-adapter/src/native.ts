@@ -545,6 +545,7 @@ export class NativeWorkerAdapter implements NativeWorkerProtocolV2 {
         issues: parsed.success ? ["workerId, taskId, or status mismatch"] : parsed.error.issues
       });
     }
+    const capsule = redactWorkerResult(parsed.data);
     const capsuleBytes = Buffer.byteLength(JSON.stringify(parsed.data), "utf8");
     if (capsuleBytes > MAX_CAPSULE_BYTES) {
       throw new ThreadAdapterError("Worker result capsule exceeds the native protocol budget", "WORKER_RESULT_INVALID", {
@@ -568,7 +569,7 @@ export class NativeWorkerAdapter implements NativeWorkerProtocolV2 {
       terminalObservedAt: handle.terminalObservedAt ?? now,
       updatedAt: now
     }));
-    return parsed.data;
+    return capsule;
   }
 
   async interrupt(workerId: string, reason: string): Promise<void> {
@@ -967,9 +968,29 @@ function capabilityUnavailable(host: NativeHostId, operation: string): ThreadAda
 }
 
 function boundedErrorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : "Native cleanup failed")
+  return redactCredentialText(error instanceof Error ? error.message : "Native cleanup failed")
+    .slice(0, 2_000);
+}
+
+function redactWorkerResult(result: WorkerResult): WorkerResult {
+  return NativeWorkerCapsuleSchema.parse(redactCapsuleValue(result));
+}
+
+function redactCapsuleValue(value: unknown): unknown {
+  if (typeof value === "string") return redactCredentialText(value);
+  if (Array.isArray(value)) return value.map(redactCapsuleValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactCapsuleValue(entry)]));
+  }
+  return value;
+}
+
+function redactCredentialText(value: string): string {
+  return value
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [REDACTED]")
     .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{8,}\b/giu, "[REDACTED]")
+    .replace(/\b(?:gh[pousr]|github_pat|npm)_[A-Za-z0-9_]{8,}\b/giu, "[REDACTED]")
+    .replace(/\bAKIA[A-Z0-9]{12,}\b/gu, "[REDACTED]")
     .replace(/\b((?:_?auth)?token|otp|password|secret|api[-_]?key)\s*[:=]\s*([^\s&]+)/giu, "$1=[REDACTED]")
-    .slice(0, 2_000);
+    .replace(/https:\/\/([^:\s/@]+):([^@\s]+)@/giu, "https://$1:[REDACTED]@");
 }

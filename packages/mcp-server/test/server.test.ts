@@ -143,6 +143,7 @@ describe("AgentFlow MCP server", () => {
       "task_retry",
       "task_setup_abort",
       "worker_bind",
+      "worker_cleanup_record",
       "worker_close",
       "worker_collect",
       "worker_dispatch_prepare",
@@ -790,6 +791,135 @@ describe("AgentFlow MCP server", () => {
     });
   });
 
+  it("lets the Supervisor complete an integration Task on the approved branch without a Worker", async () => {
+    const connectedClient = requireClient(client);
+    await runGit(directory, ["init", "--initial-branch=main"]);
+    await runGit(directory, ["config", "user.name", "AgentFlow Test"]);
+    await runGit(directory, ["config", "user.email", "agentflow@example.test"]);
+    await writeFile(join(directory, ".gitignore"), ".agentflow/\n", "utf8");
+    await writeFile(join(directory, "README.md"), "# Inline fixture\n", "utf8");
+    await runGit(directory, ["add", ".gitignore", "README.md"]);
+    await runGit(directory, ["commit", "-m", "test: establish inline baseline"]);
+    const baseRevision = await runGit(directory, ["rev-parse", "HEAD"]);
+    await mkdir(join(directory, "packages", "dependency"), { recursive: true });
+    await mkdir(join(directory, "packages", "task-inline"), { recursive: true });
+    await writeFile(join(directory, "packages", "dependency", "output.txt"), "dependency output\n", "utf8");
+    await runGit(directory, ["add", "packages/dependency/output.txt"]);
+    await runGit(directory, ["commit", "-m", "feat: integrate prior dependency"]);
+
+    const verificationCommand = "node -e \"process.exit(0)\"";
+    let result = await call(connectedClient, "task_create", {
+      taskId: "task-inline",
+      stageId: "S0",
+      title: "Write one Supervisor-owned output",
+      writeScopes: ["packages/task-inline/**"],
+      forbiddenScopes: [".agentflow/**"],
+      acceptanceCriteria: ["The Supervisor commits the isolated output"],
+      verificationCommands: [verificationCommand],
+      expectedOutputs: ["One verified Git commit"],
+      requiresWorktree: false,
+      ...mutation(0, "inline-create-task", "supervisor-1")
+    });
+    expect(runState(result).tasks["task-inline"]?.status).toBe("ready");
+
+    const statePath = join(projectPaths(directory).runsDirectory, "run-contract", "state.json");
+    const rawState = JSON.parse(await readFile(statePath, "utf8")) as {
+      tasks: Record<string, Record<string, unknown>>;
+    };
+    rawState.tasks["task-inline"] = {
+      ...rawState.tasks["task-inline"],
+      materializedFrom: {
+        artifactId: "implementation-plan-inline",
+        kind: "implementation-plan",
+        sha256: "a".repeat(64)
+      },
+      planRepository: { branch: "main", baseRevision }
+    };
+    await writeFile(statePath, `${JSON.stringify(rawState, null, 2)}\n`, "utf8");
+
+    const workspace = { kind: "project" as const, path: directory };
+    result = await call(connectedClient, "task_claim", {
+      taskId: "task-inline",
+      workerId: "supervisor-1",
+      leaseSeconds: 900,
+      workspace,
+      ...mutation(1, "inline-claim-task", "supervisor-1")
+    });
+    expect(runState(result)).toMatchObject({
+      revision: 2,
+      tasks: {
+        "task-inline": {
+          status: "running",
+          owner: "supervisor-1",
+          ownerKind: "supervisor",
+          workspace
+        }
+      },
+      workers: {}
+    });
+
+    await writeFile(join(directory, "packages", "task-inline", "output.txt"), "inline output\n", "utf8");
+    await runGit(directory, ["add", "packages/task-inline/output.txt"]);
+    await runGit(directory, ["commit", "-m", "feat: add inline output"]);
+    const headRevision = await runGit(directory, ["rev-parse", "HEAD"]);
+    const completedAt = new Date().toISOString();
+    const completion = {
+      taskId: "task-inline",
+      workerId: "supervisor-1",
+      workspace,
+      verification: [{
+        command: verificationCommand,
+        status: "passed",
+        summary: "Inline verification passed",
+        recordedAt: completedAt
+      }],
+      result: {
+        summary: "The Supervisor committed the isolated output.",
+        artifacts: [],
+        changeSet: {
+          kind: "git-commits",
+          baseRevision,
+          headRevision,
+          revisions: [headRevision],
+          changedPaths: ["packages/task-inline/output.txt"]
+        },
+        risks: [],
+        followUps: [],
+        completedAt
+      }
+    };
+    const forged = await call(connectedClient, "task_complete", {
+      ...completion,
+      result: {
+        ...completion.result,
+        changeSet: { ...completion.result.changeSet, changedPaths: ["packages/task-inline/forged.txt"] }
+      },
+      ...mutation(2, "inline-reject-forged-path", "supervisor-1")
+    });
+    expect(forged).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_CHANGESET_GIT_MISMATCH" }
+    });
+
+    result = await call(connectedClient, "task_complete", {
+      ...completion,
+      ...mutation(2, "inline-complete-task", "supervisor-1")
+    });
+    expect(runState(result)).toMatchObject({
+      revision: 3,
+      tasks: {
+        "task-inline": {
+          status: "completed",
+          owner: "supervisor-1",
+          ownerKind: "supervisor",
+          result: { changeSet: { headRevision } }
+        }
+      },
+      workers: {}
+    });
+    expect(runState(result).events.at(-1)?.type).toBe("task.completed.inline");
+  });
+
   it("persists a failed live preflight and resumes the same stage after a passing probe", async () => {
     const connectedClient = requireClient(client);
     let result = await call(connectedClient, "artifact_register", {
@@ -884,12 +1014,80 @@ describe("AgentFlow MCP server", () => {
     });
     expect(runState(result).workers["native-worker"]?.status).toBe("prepared");
 
+    const handleAt = new Date().toISOString();
+    const nativeHandle = {
+      version: 2,
+      host: "codex",
+      adapterVersion: "2.0.0",
+      workerId: "native-worker",
+      taskId: "native-task",
+      nativeId: "codex-native-thread",
+      taskName: "run-contract-native-task-native-worker",
+      status: "starting",
+      promptHash: sha256("bounded prompt"),
+      promptBytes: Buffer.byteLength("bounded prompt", "utf8"),
+      contextPolicy: {
+        mode: "fresh-attested",
+        inheritedTurnCountObservable: true,
+        inheritedTurnCount: 0
+      },
+      toolProfile: {
+        mode: "allowlist",
+        enforced: true,
+        tools: ["read_file", "apply_patch"],
+        agentflowMcpEnabled: false
+      },
+      capabilities: {
+        spawnFresh: "supported",
+        bind: "supported",
+        send: "supported",
+        status: "supported",
+        waitAny: "supported",
+        collect: "supported",
+        interrupt: "supported",
+        close: "supported",
+        archive: "supported"
+      },
+      permitId: "00000000-0000-4000-8000-000000000001",
+      permitOwnerId: "native-worker-owner",
+      cleanup: {
+        close: { status: "pending" },
+        archive: { status: "pending" },
+        permitRelease: { status: "pending" }
+      },
+      createdAt: handleAt,
+      updatedAt: handleAt
+    } as const;
+    const inheritedBinding = await call(connectedClient, "worker_bind", {
+      workerId: "native-worker",
+      externalThreadId: "codex-native-thread",
+      nativeHandle: {
+        ...nativeHandle,
+        contextPolicy: { ...nativeHandle.contextPolicy, inheritedTurnCount: 1 }
+      },
+      ...mutation(3, "native-reject-inherited-bind", "supervisor-1")
+    });
+    expect(inheritedBinding).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_CONTEXT_ISOLATION_INVALID" }
+    });
+
     result = await call(connectedClient, "worker_bind", {
       workerId: "native-worker",
       externalThreadId: "codex-native-thread",
+      nativeHandle,
       ...mutation(3, "native-bind", "supervisor-1")
     });
-    expect(runState(result).workers["native-worker"]?.externalThreadId).toBe("codex-native-thread");
+    expect(runState(result).workers["native-worker"]).toMatchObject({
+      externalThreadId: "codex-native-thread",
+      adapterVersion: "2.0.0",
+      contextPolicy: {
+        mode: "fresh-attested",
+        inheritedTurnCount: 0,
+        promptBytes: Buffer.byteLength("bounded prompt", "utf8"),
+        agentflowMcpEnabled: false
+      }
+    });
 
     const unsafeCancellation = await call(connectedClient, "run_cancel", {
       ...mutation(4, "cancel-live-native-worker", "supervisor-1")
@@ -956,7 +1154,7 @@ describe("AgentFlow MCP server", () => {
         workerId: "native-worker",
         taskId: "native-task",
         status: "completed",
-        summary: "Native host work completed.",
+        summary: "Native host work completed with token=mcp-capsule-secret.",
         artifacts: [],
         changeSet: null,
         verification: [{
@@ -973,12 +1171,58 @@ describe("AgentFlow MCP server", () => {
     });
     expect(runState(result).tasks["native-task"]?.status).toBe("completed");
     expect(runState(result).workers["native-worker"]?.status).toBe("completed");
+    expect(runState(result).tasks["native-task"]?.result).toMatchObject({
+      summary: "Native host work completed with token=[REDACTED]"
+    });
+    expect(JSON.stringify(runState(result))).not.toContain("mcp-capsule-secret");
 
     result = await call(connectedClient, "worker_close", {
       workerId: "native-worker",
       ...mutation(10, "native-close", "supervisor-1")
     });
     expect(runState(result).workers["native-worker"]?.status).toBe("closed");
+
+    const cleanupAt = new Date().toISOString();
+    const cleanupReceipt = {
+      version: 1,
+      host: "codex",
+      adapterVersion: "2.0.0",
+      workerId: "native-worker",
+      nativeId: "codex-native-thread",
+      durableAt: cleanupAt,
+      close: { status: "completed", at: cleanupAt },
+      archive: {
+        status: "unsupported",
+        at: cleanupAt,
+        reason: "Host has no archive operation; token=cleanup-secret"
+      },
+      permitRelease: { status: "completed", at: cleanupAt },
+      completedAt: cleanupAt,
+      completed: true
+    } as const;
+    const mismatchedCleanup = await call(connectedClient, "worker_cleanup_record", {
+      workerId: "native-worker",
+      receipt: { ...cleanupReceipt, adapterVersion: "2.0.1" },
+      ...mutation(11, "native-reject-cleanup-version", "supervisor-1")
+    });
+    expect(mismatchedCleanup).toMatchObject({
+      isError: true,
+      structuredContent: { error: "WORKER_CLEANUP_RECEIPT_MISMATCH" }
+    });
+
+    result = await call(connectedClient, "worker_cleanup_record", {
+      workerId: "native-worker",
+      receipt: cleanupReceipt,
+      ...mutation(11, "native-cleanup-record", "supervisor-1")
+    });
+    const cleanupState = runState(result);
+    expect(cleanupState.workers["native-worker"]?.cleanup).toMatchObject({
+      close: { status: "completed" },
+      archive: { status: "unsupported", reason: "Host has no archive operation; token=[REDACTED]" },
+      permitRelease: { status: "completed" },
+      completedAt: expect.any(String)
+    });
+    expect(JSON.stringify(cleanupState)).not.toContain("cleanup-secret");
   });
 
   it("validates and hash-binds known M2 artifact payloads before registration", async () => {

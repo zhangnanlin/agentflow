@@ -259,6 +259,30 @@ describe("S11 to S12 real Git flow", () => {
       }));
       expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
       state = runState(result);
+      result = await call(connectedClient, "worker_cleanup_record", mutation(
+        state,
+        `cleanup-${worker.workerId}`,
+        "supervisor",
+        {
+          workerId: worker.workerId,
+          receipt: {
+            version: 1,
+            host: "codex",
+            adapterVersion: "1",
+            workerId: worker.workerId,
+            nativeId: `codex-${worker.workerId}`,
+            resultCollectedAt: completedAt,
+            durableAt: completedAt,
+            close: { status: "unsupported", at: completedAt, reason: "Adapter has no native close capability" },
+            archive: { status: "unsupported", at: completedAt, reason: "Fixture host has no archive capability" },
+            permitRelease: { status: "completed", at: completedAt },
+            completedAt,
+            completed: true
+          }
+        }
+      ));
+      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+      state = runState(result);
     }
     expect(state.tasks["task-api"]?.status).toBe("completed");
     expect(state.tasks["task-web"]?.status).toBe("completed");
