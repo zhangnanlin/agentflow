@@ -37,6 +37,8 @@ export const TaskStatusSchema = z.enum([
 ]);
 
 export const RunStatusSchema = z.enum(["active", "blocked", "completed", "cancelled"]);
+export const ExecutionStatusSchema = z.enum(["running", "terminal"]);
+export const BusinessOutcomeSchema = z.enum(["succeeded", "failed", "blocked", "cancelled", "superseded"]);
 export const GateStatusSchema = z.enum(["pending", "approved", "rejected", "stale"]);
 export const GateTypeSchema = z.enum(["human", "automatic"]);
 export const ActorKindSchema = z.enum(["user", "supervisor", "worker", "system"]);
@@ -60,6 +62,27 @@ export const ThreadCapabilitiesSchema = z.object({
   interrupt: z.boolean(),
   close: z.boolean()
 });
+
+export const WorkerContextPolicySchema = z.object({
+  mode: z.enum(["unknown", "fresh-required", "fresh-attested"]).default("unknown"),
+  inheritedTurnCount: z.number().int().nonnegative().optional(),
+  promptBytes: z.number().int().nonnegative().optional(),
+  agentflowMcpEnabled: z.boolean().optional()
+}).strict();
+
+export const CleanupStepSchema = z.object({
+  status: z.enum(["pending", "completed", "unsupported", "failed"]),
+  at: IsoDateSchema.optional(),
+  reason: z.string().min(1).max(2_000).optional()
+}).strict();
+
+export const WorkerCleanupSchema = z.object({
+  resultCollectedAt: IsoDateSchema.optional(),
+  close: CleanupStepSchema,
+  archive: CleanupStepSchema,
+  permitRelease: CleanupStepSchema,
+  completedAt: IsoDateSchema.optional()
+}).strict();
 
 export const ResourceStatusSchema = z.enum(["active", "released"]);
 export const ResourceOperationStatusSchema = z.enum(["running", "completed", "failed"]);
@@ -151,12 +174,15 @@ export const WorkerSchema = z.object({
   id: IdSchema,
   taskId: IdSchema,
   adapter: IdSchema,
+  adapterVersion: z.string().min(1).max(64).default("1"),
   hostTaskName: z.string().min(1).max(200),
   promptHash: Sha256Schema,
   externalThreadId: z.string().min(1).max(512).optional(),
   status: WorkerStatusSchema,
   capabilities: ThreadCapabilitiesSchema,
+  contextPolicy: WorkerContextPolicySchema.default({ mode: "unknown" }),
   result: WorkerResultSchema.optional(),
+  cleanup: WorkerCleanupSchema.optional(),
   createdAt: IsoDateSchema,
   updatedAt: IsoDateSchema
 });
@@ -236,6 +262,7 @@ export const TaskSchema = z.object({
   }).strict().optional(),
   workspace: TaskWorkspaceSchema.optional(),
   owner: IdSchema.optional(),
+  ownerKind: z.enum(["supervisor", "worker"]).optional(),
   lease: LeaseSchema.optional(),
   verification: z.array(VerificationRecordSchema).default([]),
   result: z.record(z.string(), z.unknown()).optional(),
@@ -310,6 +337,7 @@ export const IdempotencyRecordSchema = z.object({
 });
 
 export const RunStateSchema = z.object({
+  schemaVersion: z.literal(2).default(2),
   id: IdSchema,
   pipelineId: IdSchema,
   pipelineVersion: z.string().min(1),
@@ -317,6 +345,8 @@ export const RunStateSchema = z.object({
   projectType: z.enum(["new", "existing"]),
   hasUi: z.boolean(),
   status: RunStatusSchema,
+  executionStatus: ExecutionStatusSchema.default("running"),
+  businessOutcome: BusinessOutcomeSchema.optional(),
   revision: z.number().int().nonnegative(),
   activeStageId: IdSchema.optional(),
   stages: z.record(IdSchema, StageRunSchema),
@@ -334,6 +364,9 @@ export const RunStateSchema = z.object({
 
 export type ActorKind = z.infer<typeof ActorKindSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
+export type BusinessOutcome = z.infer<typeof BusinessOutcomeSchema>;
+export type CleanupStep = z.infer<typeof CleanupStepSchema>;
+export type ExecutionStatus = z.infer<typeof ExecutionStatusSchema>;
 export type Gate = z.infer<typeof GateSchema>;
 export type GateType = z.infer<typeof GateTypeSchema>;
 export type PipelineDefinition = z.infer<typeof PipelineDefinitionSchema>;
@@ -349,6 +382,8 @@ export type TaskWorkspace = z.infer<typeof TaskWorkspaceSchema>;
 export type ThreadCapabilities = z.infer<typeof ThreadCapabilitiesSchema>;
 export type VerificationRecord = z.infer<typeof VerificationRecordSchema>;
 export type Worker = z.infer<typeof WorkerSchema>;
+export type WorkerCleanup = z.infer<typeof WorkerCleanupSchema>;
+export type WorkerContextPolicy = z.infer<typeof WorkerContextPolicySchema>;
 export type WorkerChangeSet = z.infer<typeof WorkerChangeSetSchema>;
 export type WorkerResult = z.infer<typeof WorkerResultSchema>;
 export type WorkerStatus = z.infer<typeof WorkerStatusSchema>;

@@ -85,4 +85,20 @@ describe("JsonRunStore", () => {
       }
     });
   });
+
+  it("reads bounded projections without rewriting canonical state", async () => {
+    const store = new JsonRunStore(directory);
+    const engine = new AgentFlowEngine(store, defaultPipeline);
+    const state = await engine.createRun({ id: "run-projected-read", requirement: "Read projections" });
+    const path = join(directory, state.id, "state.json");
+    const before = await readFile(path, "utf8");
+
+    const summary = await store.loadSummary(state.id);
+    const events = await store.loadSection(state.id, "events", { pageSize: 1 });
+    const after = await readFile(path, "utf8");
+
+    expect(summary).toMatchObject({ runId: state.id, revision: 0, activeStageId: "S00" });
+    expect(events.items).toHaveLength(1);
+    expect(after).toBe(before);
+  });
 });

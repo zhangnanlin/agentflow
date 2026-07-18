@@ -2,6 +2,8 @@ export * from "./engine.js";
 export * from "./contracts.js";
 export * from "./errors.js";
 export * from "./hash.js";
+export * from "./migration.js";
 export * from "./model.js";
 export * from "./pipeline.js";
+export * from "./projections.js";
 export * from "./store.js";

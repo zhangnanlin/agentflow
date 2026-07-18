@@ -104,6 +104,14 @@ export interface PrepareTaskDispatchInput extends PrepareWorkerInput {
   workspace: Omit<TaskWorkspace, "boundAt">;
 }
 
+export interface CompleteInlineTaskInput {
+  taskId: string;
+  workspace: Omit<TaskWorkspace, "boundAt">;
+  result: Omit<WorkerResult, "workerId" | "taskId" | "status" | "completedAt"> & {
+    completedAt?: string;
+  };
+}
+
 export interface AcquireResourceInput {
   resourceId: string;
   kind: string;
@@ -676,6 +684,68 @@ export class AgentFlowEngine {
       const records = verification.map((record) => VerificationRecordSchema.parse(record));
       this.completeTaskState(state, taskId, workerId, records, result, now);
       this.event(state, "task.completed", context.actor, now, { taskId, workerId });
+      return state;
+    });
+  }
+
+  completeInlineTask(
+    runId: string,
+    input: CompleteInlineTaskInput,
+    context: MutationContext
+  ): Promise<RunState> {
+    return this.mutate(runId, "task.complete.inline", context, (state, now) => {
+      invariant(context.actor.kind === "supervisor", "Only a Supervisor can complete an inline Task", "TASK_INLINE_ACTOR_INVALID");
+      const task = state.tasks[input.taskId];
+      invariant(task?.status === "running" && task.lease, `Task is not running: ${input.taskId}`, "TASK_NOT_RUNNING");
+      invariant(task.owner === context.actor.id, "Supervisor does not own the inline Task", "TASK_OWNER_MISMATCH");
+      invariant(Date.parse(task.lease.expiresAt) > Date.parse(now), "Task lease has expired", "TASK_LEASE_EXPIRED");
+      invariant(
+        !Object.values(state.workers).some((worker) => worker.taskId === task.id && isLiveWorker(worker.status)),
+        `Task still has a live worker: ${task.id}`,
+        "TASK_WORKER_LIVE"
+      );
+      invariant(isAbsolute(input.workspace.path), "Inline Task workspace path must be absolute", "TASK_WORKSPACE_PATH_INVALID", {
+        path: input.workspace.path
+      });
+      const workspace = TaskWorkspaceSchema.parse({ ...input.workspace, boundAt: now });
+      invariant(!task.requiresWorktree || workspace.kind === "worktree", `Task requires an isolated worktree: ${task.id}`, "TASK_WORKTREE_REQUIRED");
+      if (task.planRepository && workspace.kind === "worktree") {
+        invariant(
+          workspace.baseRevision === task.planRepository.baseRevision && workspace.branch !== task.planRepository.branch,
+          `Task worktree does not match the approved repository baseline: ${task.id}`,
+          "TASK_WORKSPACE_BASE_MISMATCH"
+        );
+      }
+      if (task.workspace) {
+        invariant(
+          task.workspace.kind === workspace.kind
+          && task.workspace.path === workspace.path
+          && task.workspace.branch === workspace.branch
+          && task.workspace.baseRevision === workspace.baseRevision,
+          `Inline Task workspace changed: ${task.id}`,
+          "TASK_WORKSPACE_CONFLICT"
+        );
+      } else {
+        task.workspace = workspace;
+      }
+      task.ownerKind = "supervisor";
+
+      const result = WorkerResultSchema.parse({
+        ...input.result,
+        workerId: context.actor.id,
+        taskId: task.id,
+        status: "completed",
+        completedAt: input.result.completedAt ?? now
+      });
+      this.assertWorkerChangeSet(task, result);
+      this.completeTaskState(state, task.id, context.actor.id, result.verification, {
+        summary: result.summary,
+        artifacts: result.artifacts,
+        changeSet: result.changeSet,
+        risks: result.risks,
+        followUps: result.followUps
+      }, now);
+      this.event(state, "task.completed.inline", context.actor, now, { taskId: task.id });
       return state;
     });
   }

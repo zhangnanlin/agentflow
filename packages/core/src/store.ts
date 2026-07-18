@@ -2,6 +2,15 @@ import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/prom
 import { dirname, join } from "node:path";
 import { AgentFlowError, invariant } from "./errors.js";
 import { RunStateSchema, type MutationContext, type RunState } from "./model.js";
+import { migrateRunState } from "./migration.js";
+import {
+  projectRunSection,
+  projectRunSummary,
+  type RunSection,
+  type RunSectionOptions,
+  type RunSectionPage,
+  type RunSummary
+} from "./projections.js";
 
 export interface TransactionOptions extends MutationContext {
   operation: string;
@@ -54,13 +63,25 @@ export class JsonRunStore implements RunStore {
 
   async load(runId: string): Promise<RunState> {
     try {
-      return RunStateSchema.parse(JSON.parse(await readFile(this.statePath(runId), "utf8")));
+      return migrateRunState(JSON.parse(await readFile(this.statePath(runId), "utf8")));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new AgentFlowError(`Run not found: ${runId}`, "RUN_NOT_FOUND", { runId });
       }
       throw error;
     }
+  }
+
+  async loadSummary(runId: string): Promise<RunSummary> {
+    return projectRunSummary(await this.load(runId));
+  }
+
+  async loadSection(
+    runId: string,
+    section: RunSection,
+    options: RunSectionOptions = {}
+  ): Promise<RunSectionPage> {
+    return projectRunSection(await this.load(runId), section, options);
   }
 
   async transact(
