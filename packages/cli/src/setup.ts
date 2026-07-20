@@ -346,10 +346,43 @@ async function pathIsDirectory(path: string): Promise<boolean | undefined> {
   }
 }
 
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function manifestOwnedSkills(input: {
+  installManifest: string;
+  runtimeRoot: string;
+  runtimeCli: string;
+  runtimeMcp: string;
+  skillsRoot: string;
+}): Promise<Set<string>> {
+  await assertNoLinkedDestination(input.runtimeRoot, input.installManifest);
+  const content = await readOptional(input.installManifest);
+  if (content === undefined) return new Set();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(content));
+  } catch {
+    return new Set();
+  }
+  if (!record(parsed) || parsed.schemaVersion !== 1
+    || parsed.skillsRoot !== input.skillsRoot || !record(parsed.runtime)
+    || parsed.runtime.cli !== input.runtimeCli || parsed.runtime.mcp !== input.runtimeMcp
+    || !Array.isArray(parsed.skills)
+    || parsed.skills.some((skill) => typeof skill !== "string"
+      || !/^[a-z0-9][a-z0-9-]*$/.test(skill))) {
+    return new Set();
+  }
+  return new Set(parsed.skills as string[]);
+}
+
 async function assertCompatibleSkill(
   skillName: string,
   sourceFiles: CollectedFile[],
-  destinationRoot: string
+  destinationRoot: string,
+  ownedSkills: ReadonlySet<string>
 ): Promise<void> {
   const destinationKind = await pathIsDirectory(destinationRoot);
   if (destinationKind === undefined) return;
@@ -360,6 +393,7 @@ async function assertCompatibleSkill(
       { skillName, destinationRoot }
     );
   }
+  if (ownedSkills.has(skillName)) return;
 
   const existingFiles = await collectFiles(destinationRoot);
   const sourceByPath = new Map(sourceFiles.map((file) => [file.relativePath, file.content]));
@@ -393,7 +427,8 @@ async function plannedSkillFiles(
   skillName: string,
   sourceRoot: string,
   destinationSkillsRoot: string,
-  safetyRoot: string
+  safetyRoot: string,
+  ownedSkills: ReadonlySet<string>
 ): Promise<PlannedFile[]> {
   assertSkillName(skillName);
   const destinationRoot = resolveSetupDestination(
@@ -402,7 +437,7 @@ async function plannedSkillFiles(
   );
   await assertNoLinkedDestination(safetyRoot, destinationRoot);
   const sourceFiles = await collectFiles(sourceRoot);
-  await assertCompatibleSkill(skillName, sourceFiles, destinationRoot);
+  await assertCompatibleSkill(skillName, sourceFiles, destinationRoot, ownedSkills);
   return sourceFiles.map((file) => ({
     path: resolveSetupDestination(destinationRoot, file.relativePath),
     safetyRoot,
@@ -415,7 +450,8 @@ async function agentFlowSkillFiles(
   skillsDirectory: string,
   assetsRoot: string,
   destinationSkillsRoot: string,
-  safetyRoot: string
+  safetyRoot: string,
+  ownedSkills: ReadonlySet<string>
 ): Promise<PlannedFile[]> {
   resolveSetupDestination(assetsRoot, skillsDirectory);
   await assertNoLinkedDestination(assetsRoot, skillsDirectory);
@@ -443,7 +479,8 @@ async function agentFlowSkillFiles(
       entry.name,
       sourceRoot,
       destinationSkillsRoot,
-      safetyRoot
+      safetyRoot,
+      ownedSkills
     ));
   }
   return planned;
@@ -540,7 +577,8 @@ async function externalSkillFiles(
   lockContent: Uint8Array,
   destinationSkillsRoot: string,
   safetyRoot: string,
-  gitRunner: GitRunner
+  gitRunner: GitRunner,
+  ownedSkills: ReadonlySet<string>
 ): Promise<PlannedFile[]> {
   const dependency = lockedSuperpowers(lockContent);
   const staging = await mkdtemp(join(tmpdir(), "agentflow-superpowers-"));
@@ -583,7 +621,8 @@ async function externalSkillFiles(
         skillName,
         sourceRoot,
         destinationSkillsRoot,
-        safetyRoot
+        safetyRoot,
+        ownedSkills
       ));
     }
     return planned;
@@ -685,11 +724,20 @@ async function planGlobalSetup(
     source: options.assets.skillsLockPath
   });
 
+  const ownedSkills = await manifestOwnedSkills({
+    installManifest: paths.installManifest,
+    runtimeRoot: paths.runtimeRoot,
+    runtimeCli: paths.runtimeCli,
+    runtimeMcp: paths.runtimeMcp,
+    skillsRoot: paths.skillsRoot
+  });
+
   for (const skillFile of await agentFlowSkillFiles(
     options.assets.skillsDirectory,
     options.assets.root,
     paths.skillsRoot,
-    paths.skillsRoot
+    paths.skillsRoot,
+    ownedSkills
   )) {
     await add(skillFile);
   }
@@ -698,7 +746,8 @@ async function planGlobalSetup(
       lockContent,
       paths.skillsRoot,
       paths.skillsRoot,
-      gitRunner
+      gitRunner,
+      ownedSkills
     )) {
       await add(skillFile);
     }
@@ -898,11 +947,13 @@ export async function planSetup(
   await add({ path: lockPath, content: lockContent, source: options.assets.skillsLockPath });
 
   const skillsRoot = resolveSetupDestination(projectRoot, ".agents/skills");
+  const ownedSkills = new Set<string>();
   for (const skillFile of await agentFlowSkillFiles(
     options.assets.skillsDirectory,
     options.assets.root,
     skillsRoot,
-    projectRoot
+    projectRoot,
+    ownedSkills
   )) {
     await add(skillFile);
   }
@@ -911,7 +962,8 @@ export async function planSetup(
       lockContent,
       skillsRoot,
       projectRoot,
-      gitRunner
+      gitRunner,
+      ownedSkills
     )) {
       await add(skillFile);
     }

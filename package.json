@@ -1,6 +1,6 @@
 {
   "name": "agentflow",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Stateful orchestration for staged, multi-thread agent development workflows.",
   "license": "UNLICENSED",
   "type": "module",

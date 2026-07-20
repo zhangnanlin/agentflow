@@ -157,7 +157,7 @@ afterEach(async () => {
 });
 
 describe("standalone AgentFlow distribution", () => {
-  it("declares exact public AgentFlow 0.4.0 package metadata", async () => {
+  it("declares exact public AgentFlow 0.5.0 package metadata", async () => {
     const [packageJson, lockJson] = await Promise.all([
       readFile(resolve(repositoryRoot, "package.json"), "utf8").then((content) => (
         JSON.parse(content) as {
@@ -175,7 +175,7 @@ describe("standalone AgentFlow distribution", () => {
 
     expect(packageJson).toMatchObject({
       name: "agentflow",
-      version: "0.4.0",
+      version: "0.5.0",
       license: "UNLICENSED",
       publishConfig: { access: "public" },
       repository: {
@@ -189,7 +189,7 @@ describe("standalone AgentFlow distribution", () => {
     expect(packageJson.private).toBeUndefined();
     expect(lockJson.packages[""]).toMatchObject({
       name: "agentflow",
-      version: "0.4.0",
+      version: "0.5.0",
       license: "UNLICENSED"
     });
 
@@ -236,8 +236,8 @@ describe("standalone AgentFlow distribution", () => {
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-release-gate/SKILL.md"), "utf8"),
       readFile(resolve(repositoryRoot, ".agents/skills/agentflow-completion-verifier/SKILL.md"), "utf8")
     ]);
-    const primaryCommand = "npx --yes agentflow@0.4.0 setup --host codex";
-    const immutableGitCommand = "npx --yes github:zhangnanlin/agentflow#v0.4.0 setup --host codex";
+    const primaryCommand = "npx --yes agentflow@0.5.0 setup --host codex";
+    const immutableGitCommand = "npx --yes github:zhangnanlin/agentflow#v0.5.0 setup --host codex";
 
     for (const documentation of [english, chinese, hostSetup]) {
       expect(documentation).toContain(primaryCommand);
@@ -482,7 +482,7 @@ describe("standalone AgentFlow distribution", () => {
       result: {
         capabilities: { tools: expect.any(Object) },
         instructions: expect.stringMatching(/recommended default without asking[\s\S]*blocking material choice without a safe default/i),
-        serverInfo: { version: "0.4.0" }
+        serverInfo: { version: "0.5.0" }
       }
     });
   }, 60_000);
@@ -592,7 +592,7 @@ describe("standalone AgentFlow distribution", () => {
       [key: string]: unknown;
     };
     expect(manifest).toMatchObject({
-      version: "0.4.0",
+      version: "0.5.0",
       runtime: { mcp: join(runtimeRoot, "bin", "agentflow-mcp.mjs") }
     });
     expect(JSON.stringify(manifest)).not.toMatch(/token|secret|authorization/i);
@@ -609,7 +609,7 @@ describe("standalone AgentFlow distribution", () => {
     try {
       expect(client.getServerVersion()).toMatchObject({
         name: "agentflow",
-        version: "0.4.0"
+        version: "0.5.0"
       });
       expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(
         expectedToolNames

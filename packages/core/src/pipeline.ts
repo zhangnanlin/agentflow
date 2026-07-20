@@ -81,7 +81,7 @@ export function downstreamStageIds(pipeline: PipelineDefinition, sourceId: strin
 
 export const defaultPipeline = validatePipeline({
   id: "agentflow-default",
-  version: "0.4.0",
+  version: "0.5.0",
   name: "AgentFlow default software delivery pipeline",
   stages: [
     { id: "S00", name: "Intake", skills: ["agentflow-orchestrator"], requiredArtifactKinds: ["project-context"] },

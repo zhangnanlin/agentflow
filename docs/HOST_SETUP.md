@@ -7,7 +7,7 @@ This guide covers user-global installation, Supervisor and Worker separation, ho
 Install AgentFlow once for the current user:
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host codex
+npx --yes agentflow@0.5.0 setup --host codex
 ```
 
 Use `cursor`, `vscode`, or `all` for another host. Run the same command again to update AgentFlow-owned files while preserving unrelated Skills, custom agents, and host settings. Preview the complete validated write plan with `--dry-run`.
@@ -15,15 +15,15 @@ Use `cursor`, `vscode`, or `all` for another host. Run the same command again to
 The npm version is immutable. The corresponding immutable Git tag is an alternative for environments that install directly from GitHub:
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.4.0 setup --host codex
+npx --yes github:zhangnanlin/agentflow#v0.5.0 setup --host codex
 ```
 
 ### Update An Existing Installation
 
-To load AgentFlow 0.4.0, an existing user reruns the same global setup command:
+To load AgentFlow 0.5.0, an existing user reruns the same global setup command:
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host codex
+npx --yes agentflow@0.5.0 setup --host codex
 ```
 
 Restart Codex if it has not reloaded the installed bundle. Do not rerun setup in individual projects. The update reuses the existing AgentFlow MCP entry and introduces no new MCP server or OAuth flow; Figma OAuth remains a separate host-managed action only when a UI Stage requires it.
@@ -206,7 +206,7 @@ After a Worker becomes terminal, AgentFlow persists its result or failure eviden
 Use explicit project scope when repository-contained AgentFlow 0.2 behavior is required:
 
 ```bash
-npx --yes agentflow@0.4.0 \
+npx --yes agentflow@0.5.0 \
   --project-root /absolute/project/path setup --scope project --host codex
 ```
 

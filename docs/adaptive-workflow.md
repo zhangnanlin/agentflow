@@ -1,6 +1,6 @@
 # AgentFlow Adaptive Workflow Operations
 
-This guide describes the verified adaptive routing, interaction, collaboration, rate-control, deterministic-operation, Skill-policy, rollout, and rollback behavior shipped with AgentFlow 0.4.0.
+This guide describes the verified adaptive routing, interaction, collaboration, rate-control, deterministic-operation, Skill-policy, rollout, and rollback behavior shipped with AgentFlow 0.5.0.
 
 ## Lane Selection
 
@@ -101,7 +101,7 @@ Doctor reports MCP process pressure, largest Runs, response-budget violations, s
 
 ## Rollout
 
-1. Preview setup with `npx --yes agentflow@0.4.0 setup --host codex --dry-run`.
+1. Preview setup with `npx --yes agentflow@0.5.0 setup --host codex --dry-run`.
 2. Run normal setup, restart the host, and retain the Supervisor AgentFlow MCP configuration.
 3. Run Doctor and confirm project resolution, response budgets, scheduler capacity, and static Worker profiles.
 4. Enable native delegation only when the live adapter reports fresh-context and tool-policy conformance. Otherwise keep inline or serial fallback.

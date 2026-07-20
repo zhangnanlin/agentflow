@@ -9,19 +9,19 @@ AgentFlow 在 Codex、Cursor 或 VS Code 中，用一个 Supervisor 任务和多
 前置条件：Node.js 20 或更高版本、Git，以及 Codex、Cursor 或 VS Code。
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host codex
+npx --yes agentflow@0.5.0 setup --host codex
 ```
 
 按需把 `codex` 换成 `cursor`、`vscode`，也可以一次配置全部宿主：
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host all
+npx --yes agentflow@0.5.0 setup --host all
 ```
 
 npm 版本是不可变的。对于需要直接从 GitHub 安装的环境，也可以使用对应的不可变 Git tag：
 
 ```bash
-npx --yes github:zhangnanlin/agentflow#v0.4.0 setup --host codex
+npx --yes github:zhangnanlin/agentflow#v0.5.0 setup --host codex
 ```
 
 全局 Setup 会安装：
@@ -36,10 +36,10 @@ Setup 只合并 `agentflow` 与 `figma` server 条目，保留无关设置，也
 
 ### 升级已有安装
 
-已经安装 AgentFlow 的用户只需重新执行同一个全局命令，即可更新到 0.4.0：
+已经安装 AgentFlow 的用户只需重新执行同一个全局命令，即可更新到 0.5.0：
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host codex
+npx --yes agentflow@0.5.0 setup --host codex
 ```
 
 如果 Codex 尚未重新加载 MCP bundle，请重启 Codex。各项目不需要重新执行 setup；这次升级既不新增 MCP server 条目，也不新增 OAuth 流程。Figma 仍由宿主按需管理，只有 UI Stage 需要时才授权。
@@ -130,7 +130,7 @@ MCP 新建 Run 时会使用带版本的确定性策略，并持久化 lane、命
 只校验全局安装计划，不写文件：
 
 ```bash
-npx --yes agentflow@0.4.0 setup --host codex --dry-run
+npx --yes agentflow@0.5.0 setup --host codex --dry-run
 ```
 
 按需覆盖用户级路径：
@@ -138,9 +138,9 @@ npx --yes agentflow@0.4.0 setup --host codex --dry-run
 ```bash
 AGENTFLOW_HOME=/absolute/runtime/path \
 CODEX_HOME=/absolute/codex/path \
-npx --yes agentflow@0.4.0 setup --host codex
+npx --yes agentflow@0.5.0 setup --host codex
 
-npx --yes agentflow@0.4.0 setup --host vscode \
+npx --yes agentflow@0.5.0 setup --host vscode \
   --vscode-config /absolute/profile/mcp.json
 ```
 
@@ -160,7 +160,7 @@ Doctor 分别输出 `installation` 与 `project`。第一次变更前的 `projec
 AgentFlow 0.2 的项目内安装仍可显式使用：
 
 ```bash
-npx --yes agentflow@0.4.0 \
+npx --yes agentflow@0.5.0 \
   --project-root /absolute/project/path setup --scope project --host codex
 ```
 

@@ -110,6 +110,45 @@ describe("AgentFlow setup", () => {
     expect(second.unchanged.length).toBeGreaterThan(0);
   });
 
+  it("upgrades a manifest-owned global Skill without weakening collision protection", async () => {
+    const sandbox = await temporaryDirectory("agentflow-global-skill-upgrade-");
+    const home = join(sandbox, "home");
+    const projectRoot = join(sandbox, "project");
+    await Promise.all([mkdir(home), mkdir(projectRoot)]);
+    const environment = globalEnvironment(home);
+    const paths = globalInstallationPaths(environment);
+    const assets = await fakeDistributionAssets(sandbox);
+    const options = {
+      scope: "global" as const,
+      projectRoot,
+      hosts: ["codex" as const],
+      assets,
+      skipExternalSkills: true
+    };
+
+    await executeSetup(options, {
+      globalPathEnvironment: environment,
+      distributionVersion: "0.4.0"
+    });
+    await writeFile(
+      join(assets.skillsDirectory, "agentflow-auto-router", "SKILL.md"),
+      "---\nname: agentflow-auto-router\ndescription: Route changes\n---\nRoute upgraded changes.\n"
+    );
+
+    const upgraded = await executeSetup(options, {
+      globalPathEnvironment: environment,
+      distributionVersion: "0.5.0"
+    });
+
+    const installedSkill = join(paths.skillsRoot, "agentflow-auto-router", "SKILL.md");
+    expect(upgraded.updated).toContain(installedSkill);
+    expect(await readFile(installedSkill, "utf8")).toContain("Route upgraded changes.");
+    expect(JSON.parse(await readFile(paths.installManifest, "utf8"))).toMatchObject({
+      version: "0.5.0",
+      skills: ["agentflow-auto-router"]
+    });
+  });
+
   it("plans global setup without writing during dry-run", async () => {
     const sandbox = await temporaryDirectory("agentflow-global-dry-");
     const home = join(sandbox, "home");

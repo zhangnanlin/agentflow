@@ -3,7 +3,7 @@ import { defaultPipeline } from "../src/index.js";
 
 describe("AgentFlow default M3 pipeline", () => {
   it("binds every engineering and quality stage to its wrapper, artifact, and gate", () => {
-    expect(defaultPipeline.version).toBe("0.4.0");
+    expect(defaultPipeline.version).toBe("0.5.0");
     const stages = Object.fromEntries(defaultPipeline.stages.map((stage) => [stage.id, stage]));
 
     expect(stages["S09"]).toMatchObject({
