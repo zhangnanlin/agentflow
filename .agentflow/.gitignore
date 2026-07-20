@@ -3,6 +3,7 @@ runtime/
 runs/
 current-run.json
 .start.lock
+.start.lock.retired-*
 .start.pending.json
 start-requests/
 *.tmp
